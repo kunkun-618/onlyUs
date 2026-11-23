@@ -1,0 +1,49 @@
+<template>
+  <view class="page">
+    <text class="eyebrow">THINGS WORTH REMEMBERING</text>
+    <text class="page-title">一些小事，一些心事。</text>
+    <text class="page-description">写给自己，也写给最特别的你。</text>
+    <view class="section-heading">
+      <view class="filter-row">
+        <text class="filter" :class="{ 'filter-active': noteFilter === 'all' }" @click="noteFilter = 'all'">全部</text>
+        <text class="filter" :class="{ 'filter-active': noteFilter === 'shared' }" @click="noteFilter = 'shared'">我们共享</text>
+        <text class="filter" :class="{ 'filter-active': noteFilter === 'private' }" @click="noteFilter = 'private'">只给自己</text>
+      </view>
+      <text class="text-link compact" @click="editNote(null)">＋ 写一篇</text>
+    </view>
+    <view v-if="!filteredNotes.length" class="empty-card">
+      <text class="empty-symbol">✎</text>
+      <text class="section-title">留一点文字，给未来的我们</text>
+      <text class="subtle">新笔记默认为私密，分享由你决定。</text>
+    </view>
+    <view v-for="note in filteredNotes" :key="note.id" class="note-card" @click="editNote(note)">
+      <view class="note-meta">
+        <text class="note-tag" :class="{ 'tag-private': note.visibility === 'private' }">{{ note.visibility === 'shared' ? '两人共享' : '仅自己可见' }}</text>
+        <text class="subtle">{{ formatDate(note.updated_at) }}</text>
+      </view>
+      <text class="note-title">{{ note.title || '无题的小纸条' }}</text>
+      <text class="note-excerpt">{{ note.content.slice(0, 160) }}</text>
+      <text class="note-author">{{ note.owner_id === userId ? '我' : partnerName }} 写下的小事 ↗</text>
+    </view>
+    <text v-if="notesMore" class="load-more" @click="loadMoreNotes">加载更多笔记</text>
+    <text class="text-link" @click="exportNotes">导出可见笔记为 Markdown →</text>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { usePairContext } from '../composables/context'
+const { noteFilter, editNote, filteredNotes, formatDate, userId, partnerName, notesMore, loadMoreNotes, exportNotes } = usePairContext()
+</script>
+
+<style>
+@import '../styles/shared.css';
+.filter-row { display: flex; flex-direction: row; align-items: center; }
+.filter { font-size: 11px; color: #a69a8e; padding: 7px 10px; }
+.filter-active { color: #a97157; background-color: #eee2d3; border-radius: 7px; }
+.note-card { padding: 19px; border-radius: 13px; border: 1px solid #e9dfd0; background-color: #fffaf0; margin-bottom: 14px; }
+.note-meta { display: flex; flex-direction: row; justify-content: space-between; align-items: center; }
+.tag-private { background-color: #eee4dc; color: #a08d7f; }
+.note-title { color: #5f4d3d; font-size: 17px; font-weight: 600; margin: 16px 0 9px; }
+.note-excerpt { font-size: 12px; line-height: 23px; color: #9b8875; white-space: pre-wrap; }
+.note-author { color: #b9a38d; font-size: 10px; margin-top: 19px; }
+</style>

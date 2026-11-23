@@ -1,0 +1,32 @@
+<template>
+  <view class="overlay">
+    <scroll-view class="modal note-modal" direction="vertical">
+      <view class="section-heading">
+        <text class="modal-title">{{ noteReadOnly ? '你写给我的' : editingId ? '编辑小纸条' : '新的一页' }}</text>
+        <text class="text-link compact" @click="closeNote">关闭</text>
+      </view>
+      <input v-model="noteTitle" class="note-title-input" placeholder="给这一天起个名字" :maxlength="200" :disabled="noteReadOnly" />
+      <textarea v-model="noteContent" class="note-textarea" placeholder="把值得记住的事，慢慢写下来…" :maxlength="100000" :disabled="noteReadOnly" />
+      <view class="visibility-row">
+        <text class="setting-title">{{ noteShared ? '两人共享' : '仅自己可见' }}</text>
+        <switch :checked="noteShared" :disabled="noteReadOnly" color="#be7060" @change="noteShared = $event.detail.value" />
+      </view>
+      <text class="subtle">{{ noteShared ? '对方可以阅读，只有作者可以编辑或删除。' : '这是一篇私密笔记，只有你自己可以看到。' }}</text>
+      <button v-if="!noteReadOnly" class="primary" :disabled="busy" @click="saveNote">{{ busy ? '保存中…' : '保存这份小心事' }}</button>
+      <text v-if="editingId && !noteReadOnly" class="delete-note" @click="deleteNote">删除这篇笔记</text>
+    </scroll-view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { usePairContext } from '../composables/context'
+const { noteReadOnly, editingId, closeNote, noteTitle, noteContent, noteShared, busy, saveNote, deleteNote } = usePairContext()
+</script>
+
+<style>
+@import '../styles/shared.css';
+.note-title-input { height: 48px; font-size: 20px; font-weight: 600; color: #65513f; border-bottom: 1px solid #ece2d5; }
+.note-textarea { height: 260px; width: 100%; font-size: 14px; color: #7e6c59; line-height: 26px; padding: 18px 0; }
+.visibility-row { display: flex; flex-direction: row; align-items: center; justify-content: space-between; padding: 12px 0; }
+.delete-note { color: #ae7767; font-size: 12px; text-align: center; padding: 15px; }
+</style>

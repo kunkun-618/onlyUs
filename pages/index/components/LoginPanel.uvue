@@ -1,0 +1,34 @@
+<template>
+  <view class="login-wrap">
+    <text class="eyebrow">A LITTLE WORLD FOR TWO</text>
+    <text class="login-heart">♥</text>
+    <text class="login-title">只属于我们</text>
+    <text class="login-sub">把想念、日常和小秘密，都放在这里。</text>
+    <view class="login-card">
+      <text class="section-title">欢迎回到，两个人的小世界</text>
+      <text class="field-label">账号邮箱</text>
+      <input v-model="email" class="input" placeholder="你的预置账号邮箱" type="text" />
+      <text class="field-label">密码</text>
+      <input v-model="password" class="input" placeholder="输入密码" :password="true" />
+      <button class="primary" :disabled="busy" @click="signIn">{{ busy ? '正在登录…' : '进入我们的小世界' }}</button>
+      <text class="subtle center">仅向两个预置账号开放 · 没有注册入口</text>
+    </view>
+    <text class="text-link" @click="configOpen = true">连接 Supabase 项目</text>
+    <text v-if="!configured()" class="text-link" @click="startDemo">先看看本地演示 →</text>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { usePairContext } from '../composables/context'
+const { email, password, busy, signIn, configOpen, configured, startDemo } = usePairContext()
+</script>
+
+<style>
+@import '../styles/shared.css';
+.login-wrap { flex: 1; display: flex; flex-direction: column; justify-content: center; padding: 40px 26px; max-width: 500px; width: 100%; margin: 0 auto; box-sizing: border-box; }
+.login-heart { text-align: center; color: #b97b66; font-size: 75px; margin: 25px 0 12px; }
+.login-title { text-align: center; color: #514134; font-size: 32px; font-weight: 600; letter-spacing: 3px; }
+.login-sub { color: #a28e7d; font-size: 12px; text-align: center; margin: 15px 0 30px; }
+.login-card { padding: 24px 20px; border: 1px solid #e8ded1; border-radius: 18px; background-color: #fffcf7; }
+.center { text-align: center; }
+</style>

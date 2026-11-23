@@ -1,0 +1,43 @@
+{
+  "id": "__UNI__103E908",
+  "name": "我们俩",
+  "description": "只属于两个人的私密小世界",
+  "version": {
+    "name": "1.0.0",
+    "code": "100"
+  },
+  "uni-app-x": {
+    "vapor": true,
+    "styleIsolationVersion": "2",
+    "vapor-render-target": "bytecode",
+    "vapor-default-script-lang": "ts",
+    "compilerVersion": "5.34",
+    "minRuntimeVersion": "5.31",
+    "compilerRuleVersion": 1
+  },
+  "app-android": {
+    "distribute": {
+      "modules": {
+        "uni-prompt": {},
+        "uni-exit": {},
+        "uni-storage": {},
+        "uni-showLoading": {},
+        "uni-fileSystemManager": {},
+        "uni-media": {},
+        "uni-previewImage": {},
+        "uni-network": {},
+        "uni-websocket": {},
+        "uni-form": {}
+      },
+      "icons": {
+        "hdpi": "",
+        "xhdpi": "",
+        "xxhdpi": "",
+        "xxxhdpi": ""
+      },
+      "splashScreens": {
+        "default": {}
+      }
+    }
+  }
+}

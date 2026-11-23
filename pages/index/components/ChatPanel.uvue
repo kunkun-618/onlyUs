@@ -1,0 +1,39 @@
+<template>
+  <view class="chat-panel">
+    <text class="eyebrow">LITTLE WORDS, BIG FEELINGS</text>
+    <text class="page-title">想和你说的话</text>
+    <view class="section-heading">
+      <text class="page-description">{{ partnerName }} · 两个人的对话</text>
+      <text class="status-label">{{ demo ? '本地演示' : cloud.status }}</text>
+    </view>
+    <text v-if="hasMore" class="load-more" @click="loadOlder">{{ loadingHistory ? '正在加载…' : '加载更早的消息' }}</text>
+    <view v-if="!messages.length" class="empty-card">
+      <text class="empty-symbol">“</text>
+      <text class="section-title">从一句「在干嘛」开始</text>
+      <text class="subtle">你发出的每一句话，都会被好好保存。</text>
+    </view>
+    <view v-for="message in messages" :key="message.id" class="message-row" :class="{ 'message-self': message.sender_id === userId }">
+      <text class="message-who">{{ message.sender_id === userId ? '我' : partnerName }} · {{ formatTime(message.created_at) }}</text>
+      <view class="message-bubble" :class="{ 'bubble-self': message.sender_id === userId }">
+        <text class="message-content">{{ message.content }}</text>
+      </view>
+    </view>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { usePairContext } from '../composables/context'
+const { partnerName, demo, cloud, hasMore, loadOlder, loadingHistory, messages, userId, formatTime } = usePairContext()
+</script>
+
+<style>
+@import '../styles/shared.css';
+.status-label { color: #8c9b7b; font-size: 10px; }
+.chat-panel { width: 100%; }
+.message-row { display: flex; flex-direction: column; align-items: flex-start; padding: 12px 0; }
+.message-self { align-items: flex-end; }
+.message-who { color: #aea092; font-size: 10px; margin-bottom: 7px; }
+.message-bubble { max-width: 520px; align-self: flex-start; margin-right: 24px; background-color: #fffdf9; border: 1px solid #eee3d6; border-radius: 0 14px 14px 14px; padding: 12px 15px; box-sizing: border-box; }
+.bubble-self { align-self: flex-end; margin-left: 24px; margin-right: 0; background-color: #ead8c8; border-color: #ead8c8; border-radius: 14px 0 14px 14px; }
+.message-content { color: #655143; font-size: 14px; line-height: 24px; white-space: pre-wrap; }
+</style>

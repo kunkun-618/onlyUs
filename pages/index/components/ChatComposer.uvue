@@ -1,0 +1,18 @@
+<template>
+  <view class="composer">
+    <input v-model="messageText" class="message-input" placeholder="说点什么，让我靠近你一点…" :maxlength="10000" confirm-type="send" @confirm="sendMessage" />
+    <button class="send-button" :disabled="sending" @click="sendMessage">发送</button>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { usePairContext } from '../composables/context'
+const { messageText, sendMessage, sending } = usePairContext()
+</script>
+
+<style>
+@import '../styles/shared.css';
+.composer { display: flex; flex-direction: row; align-items: center; padding: 12px 16px; background-color: #f6f0e8; }
+.message-input { flex: 1; border-radius: 10px; background-color: #fffdf9; padding: 10px 12px; font-size: 12px; height: 42px; box-sizing: border-box; }
+.send-button { margin-left: 9px; background-color: #b97b66; color: #fffaf4; font-size: 12px; border-radius: 8px; line-height: 40px; padding: 0 16px; }
+</style>

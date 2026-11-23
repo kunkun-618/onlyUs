@@ -1,0 +1,128 @@
+<template>
+  <view class="page home-page">
+    <view class="greeting">
+      <text class="eyebrow">{{ today }} · OUR LITTLE SPACE</text>
+      <text class="page-title">平凡的日子，也想和你一起。</text>
+      <text class="page-description">这里的每一件小事，都与你有关。</text>
+    </view>
+    <view class="couple-row">
+      <view class="person">
+        <view class="avatar peach"><text class="person-letter">{{ myName.slice(0, 1) }}</text></view>
+        <text class="person-name">{{ myName }}</text>
+        <text class="person-role">此刻的我</text>
+      </view>
+      <view class="connection">
+        <text class="connection-line">— — ♥ — —</text>
+        <text class="connection-caption">只有你，和我</text>
+      </view>
+      <view class="person">
+        <view class="avatar sage"><text class="person-letter sage-text">{{ partnerName.slice(0, 1) }}</text></view>
+        <text class="person-name">{{ partnerName }}</text>
+        <text class="person-role">心里的你</text>
+      </view>
+    </view>
+    <view class="miss-card">
+      <text class="miss-kicker">有些想念，不必等到见面</text>
+      <view class="heart-orbit" @click="sendMiss">
+        <view class="heart-middle">
+          <view class="heart-button" :class="{ 'heart-active': heartActive }"><text class="heart-symbol">♥</text></view>
+        </view>
+      </view>
+      <text class="miss-title">{{ heartActive ? '把想念，送到你身边' : '我有一点，想你了' }}</text>
+      <text class="miss-hint">{{ demo ? '轻触爱心，记录这一刻的想念' : '轻触爱心，向对方发送一份想念' }}</text>
+      <view class="miss-footer">
+        <text class="miss-count">今天的小想念</text>
+        <text class="miss-number">{{ todayMiss }} 次</text>
+        <text class="miss-divider">|</text>
+        <text class="miss-count">双向奔赴的日常</text>
+      </view>
+    </view>
+    <view class="section-heading">
+      <text class="section-title">把日常，慢慢收藏</text>
+      <text class="subtle">OUR EVERYDAY</text>
+    </view>
+    <view class="shortcut-row">
+      <view class="shortcut chat-shortcut" @click="switchTab('chat')">
+        <text class="shortcut-icon">“</text>
+        <text class="shortcut-title">说说话</text>
+        <text class="shortcut-sub">有好多小事想告诉你</text>
+        <text class="shortcut-arrow">聊一会儿 →</text>
+      </view>
+      <view class="shortcut photo-shortcut" @click="switchTab('photos')">
+        <text class="shortcut-icon green">▧</text>
+        <text class="shortcut-title">我们的相册</text>
+        <text class="shortcut-sub">定格每一个好时刻</text>
+        <text class="shortcut-arrow green">去看看 →</text>
+      </view>
+    </view>
+    <view class="note-entry" @click="switchTab('notes')">
+      <view class="note-entry-icon"><text class="note-icon">✎</text></view>
+      <view class="grow">
+        <text class="shortcut-title">写给时光的小纸条</text>
+        <text class="shortcut-sub">悄悄记下，或者分享给你</text>
+      </view>
+      <text class="note-arrow">→</text>
+    </view>
+    <view class="section-heading">
+      <text class="section-title">最近的小动静</text>
+      <text class="subtle">JUST BETWEEN US</text>
+    </view>
+    <view class="activity-card">
+      <view class="activity-dot"></view>
+      <view class="grow">
+        <text class="activity-title">{{ latestMiss ? (latestMiss.sender_id === userId ? '你' : partnerName) + ' 说：想你了' : '还没有想念记录' }}</text>
+        <text class="subtle">{{ latestMiss ? formatTime(latestMiss.created_at) : '点击上面的爱心，送出第一份想念' }}</text>
+      </view>
+      <text class="activity-heart">♥</text>
+    </view>
+    <text class="home-footnote">世界很大，这里刚好容下我们俩。</text>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { usePairContext } from '../composables/context'
+const { today, myName, partnerName, sendMiss, heartActive, demo, todayMiss, switchTab, latestMiss, userId, formatTime } = usePairContext()
+</script>
+
+<style>
+@import '../styles/shared.css';
+.couple-row { display: flex; flex-direction: row; justify-content: center; align-items: center; padding: 28px 0 22px; }
+.person { display: flex; flex-direction: column; align-items: center; }
+.sage { background-color: #dfe6db; }
+.sage-text { color: #7b8b70; }
+.person-name { color: #5c5147; font-size: 13px; margin-top: 8px; }
+.person-role { color: #b5aaa0; font-size: 10px; margin-top: 4px; }
+.connection { display: flex; flex-direction: column; align-items: center; width: 128px; padding-bottom: 24px; }
+.connection-line { color: #c89583; font-size: 17px; letter-spacing: 2px; }
+.connection-caption { color: #b5a497; font-size: 10px; margin-top: 8px; }
+.miss-card { display: flex; flex-direction: column; align-items: center; padding: 24px 14px 0; background-color: #f3e7de; border: 1px solid #eee0d5; border-radius: 20px; }
+.miss-kicker { color: #a88b78; font-size: 11px; letter-spacing: 2px; }
+.heart-orbit { width: 166px; height: 166px; border: 1px solid #e9d3c5; border-radius: 84px; display: flex; flex-direction: column; align-items: center; justify-content: center; margin: 22px 0 17px; }
+.heart-middle { width: 140px; height: 140px; border-radius: 72px; background-color: #edd9cb; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.heart-button { width: 110px; height: 110px; border-radius: 58px; background-color: #bd7966; display: flex; flex-direction: column; align-items: center; justify-content: center; box-shadow: 0 7px 16px #d5b09e; }
+.heart-active { background-color: #a95e50; transform: scale(1.08); }
+.heart-symbol { font-size: 53px; color: #fff8ee; }
+.miss-title { color: #745646; font-size: 21px; font-weight: 600; letter-spacing: 1px; }
+.miss-hint { color: #b29785; font-size: 10px; margin-top: 9px; }
+.miss-footer { align-self: stretch; display: flex; flex-direction: row; align-items: center; justify-content: center; margin-top: 25px; border-top: 1px solid #e8d6c9; padding: 15px 0; }
+.miss-count { color: #ab8b76; font-size: 10px; }
+.miss-number { color: #a66a54; font-size: 12px; font-weight: 600; margin-left: 8px; }
+.miss-divider { color: #d3bcaa; font-size: 12px; margin: 0 14px; }
+.shortcut-row { display: flex; flex-direction: row; }
+.shortcut { flex: 1; padding: 16px 14px; border-radius: 13px; border: 1px solid #eee3d9; }
+.chat-shortcut { background-color: #f7efe5; margin-right: 11px; }
+.photo-shortcut { background-color: #eef0e8; border-color: #e2e5da; }
+.shortcut-icon { font-size: 35px; color: #ba8e69; height: 38px; }
+.green { color: #8b967b; }
+.shortcut-title { color: #5a5045; font-size: 14px; font-weight: 600; line-height: 23px; }
+.shortcut-sub { color: #aa9a89; font-size: 10px; line-height: 21px; }
+.shortcut-arrow { font-size: 10px; color: #a78569; margin-top: 15px; }
+.note-entry { display: flex; flex-direction: row; align-items: center; background-color: #f5f0e8; border: 1px solid #ece5db; padding: 16px 13px; border-radius: 12px; margin-top: 12px; }
+.note-entry-icon { width: 37px; height: 39px; border-radius: 9px; background-color: #ebe0d0; justify-content: center; align-items: center; display: flex; flex-direction: column; margin-right: 12px; }
+.note-icon { color: #a78e6f; font-size: 25px; }
+.note-arrow { font-size: 20px; color: #b3a28d; }
+.activity-card { display: flex; flex-direction: row; align-items: center; padding: 16px; background-color: #fffdfa; border: 1px solid #eee7de; border-radius: 12px; }
+.activity-dot { width: 7px; height: 7px; background-color: #bd8a74; border-radius: 4px; margin-right: 12px; }
+.activity-title { font-size: 12px; color: #726355; line-height: 22px; }
+.activity-heart { color: #c89583; font-size: 18px; }
+</style>

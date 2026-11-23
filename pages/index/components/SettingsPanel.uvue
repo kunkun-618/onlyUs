@@ -1,0 +1,53 @@
+<template>
+  <view class="page">
+    <text class="eyebrow">OUR SPACE, OUR RULES</text>
+    <text class="page-title">小世界的设置</text>
+    <text class="page-description">简单一点，安心地在一起。</text>
+    <view class="profile-card">
+      <view class="avatar peach"><text class="person-letter">{{ myName.slice(0, 1) }}</text></view>
+      <view class="grow">
+        <text class="section-title">{{ myName }}</text>
+        <text class="subtle">{{ demo ? '本地演示身份' : cloud.session?.user.email }}</text>
+      </view>
+      <text class="note-tag">{{ demo ? '演示' : '私密成员' }}</text>
+    </view>
+    <view class="settings-card">
+      <view class="setting-row" @click="configOpen = true">
+        <text class="setting-title">Supabase 项目连接</text>
+        <text class="setting-value">{{ demo ? '尚未连接' : cloud.status }} ›</text>
+      </view>
+      <view class="setting-row" @click="refreshAll">
+        <text class="setting-title">刷新同步数据</text>
+        <text class="setting-value">↻</text>
+      </view>
+      <view class="setting-row" @click="exportNotes">
+        <text class="setting-title">导出笔记</text>
+        <text class="setting-value">Markdown ›</text>
+      </view>
+      <view class="setting-row" @click="clearCache">
+        <text class="setting-title">清理本地缓存</text>
+        <text class="setting-value">›</text>
+      </view>
+    </view>
+    <view class="tip-box">
+      <text class="tip-title">关于这个小世界</text>
+      <text class="tip-content">仅限两个预置成员使用。私密笔记只对作者开放，共享笔记两人可见。实时提示需要应用处于在线状态，暂不提供离线推送。</text>
+    </view>
+    <button class="logout-button" @click="signOut">{{ demo ? '退出本地演示' : '退出登录' }}</button>
+    <text class="home-footnote">我们俩 · 1.0.0</text>
+  </view>
+</template>
+
+<script setup lang="ts">
+import { usePairContext } from '../composables/context'
+const { myName, demo, cloud, configOpen, refreshAll, exportNotes, clearCache, signOut } = usePairContext()
+</script>
+
+<style>
+@import '../styles/shared.css';
+.profile-card { display: flex; flex-direction: row; align-items: center; padding: 22px 0; }
+.settings-card { border: 1px solid #eae2d6; border-radius: 14px; background-color: #fffdf8; padding: 0 17px; }
+.setting-row { display: flex; flex-direction: row; justify-content: space-between; align-items: center; padding: 20px 0; border-bottom: 1px solid #f0e9df; }
+.setting-value { color: #ae9b86; font-size: 11px; }
+.logout-button { background-color: #f2e9df; color: #a1745d; border: 1px solid #e8d9c9; font-size: 13px; border-radius: 10px; margin-top: 28px; }
+</style>

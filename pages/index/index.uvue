@@ -1,0 +1,85 @@
+<template>
+  <view class="app">
+    <LoginPanel v-if="!entered" class="login-host" />
+    <view v-else class="shell">
+      <view class="topbar">
+        <view class="brand">
+          <text class="brand-mark">♥</text>
+          <text class="brand-name">我们俩</text>
+          <text class="brand-en">JUST US</text>
+        </view>
+        <view class="avatar small" @click="tab = 'settings'"><text class="avatar-text">{{ myName.slice(0, 1) }}</text></view>
+      </view>
+      <scroll-view class="body" direction="vertical" :scroll-into-view="scrollTarget" :scroll-with-animation="true">
+        <view v-if="demo" class="demo-bar" @click="configOpen = true">
+          <text class="demo-label">本地演示 · 数据仅保存在此设备</text>
+          <text class="demo-action">连接云端 →</text>
+        </view>
+        <HomePanel v-if="tab === 'home'" />
+        <view v-else-if="tab === 'chat'" class="page">
+          <ChatPanel />
+          <view id="chat-end" class="chat-end"></view>
+        </view>
+        <PhotosPanel v-else-if="tab === 'photos'" />
+        <NotesPanel v-else-if="tab === 'notes'" />
+        <SettingsPanel v-else />
+      </scroll-view>
+      <ChatComposer v-if="tab === 'chat'" />
+      <view class="tabbar">
+        <view v-for="item in tabs" :key="item.key" class="tab-item" @click="switchTab(item.key)">
+          <text class="tab-icon" :class="{ 'tab-selected': tab === item.key }">{{ item.icon }}</text>
+          <text class="tab-label" :class="{ 'tab-selected': tab === item.key }">{{ item.label }}{{ item.key === 'chat' && unread ? ' · ' + unread : '' }}</text>
+          <view v-if="tab === item.key" class="tab-dot"></view>
+        </view>
+      </view>
+    </view>
+    <ConnectionDialog v-if="configOpen" />
+    <NoteEditor v-if="noteOpen" />
+  </view>
+</template>
+
+<script setup lang="ts">
+import { onShow, onHide } from '@dcloudio/uni-app'
+import { providePairContext } from './composables/context'
+import { usePairApp } from './composables/usePairApp'
+import LoginPanel from './components/LoginPanel.uvue'
+import HomePanel from './components/HomePanel.uvue'
+import ChatPanel from './components/ChatPanel.uvue'
+import ChatComposer from './components/ChatComposer.uvue'
+import PhotosPanel from './components/PhotosPanel.uvue'
+import NotesPanel from './components/NotesPanel.uvue'
+import SettingsPanel from './components/SettingsPanel.uvue'
+import ConnectionDialog from './components/ConnectionDialog.uvue'
+import NoteEditor from './components/NoteEditor.uvue'
+
+const app = usePairApp()
+providePairContext(app)
+const { entered, tab, myName, scrollTarget, demo, configOpen, noteOpen, tabs, unread, switchTab } = app
+onShow(app.handleShow)
+onHide(app.handleHide)
+</script>
+
+<style>
+@import './styles/shared.css';
+.app { flex: 1; background-color: #faf8f5; }
+.login-host { flex: 1; }
+.shell { flex: 1; display: flex; flex-direction: column; }
+.topbar { display: flex; flex-direction: row; justify-content: space-between; align-items: center; padding: 18px 24px 14px; padding-top: calc(18px + env(safe-area-inset-top)); background-color: #faf8f5; border-bottom: 1px solid #eee8e1; }
+.brand { display: flex; flex-direction: row; align-items: center; }
+.brand-mark { color: #bb715f; font-size: 24px; margin-right: 9px; }
+.brand-name { color: #403831; font-size: 21px; font-weight: 700; letter-spacing: 2px; }
+.brand-en { color: #aaa097; font-size: 9px; letter-spacing: 2px; margin-left: 12px; padding-top: 5px; }
+.body { flex: 1; height: 0; }
+.small { width: 32px; height: 32px; border-radius: 18px; border-width: 1px; }
+.avatar-text { font-size: 13px; color: #926d59; }
+.tabbar { display: flex; flex-direction: row; justify-content: space-around; padding: 12px 8px 8px; padding-bottom: calc(8px + env(safe-area-inset-bottom)); background-color: #fffdf9; border-top: 1px solid #eee7df; }
+.tab-item { flex: 1; display: flex; flex-direction: column; align-items: center; height: 46px; }
+.tab-icon { font-size: 22px; color: #bcb3a9; height: 26px; }
+.tab-label { font-size: 10px; color: #aea499; margin-top: 2px; }
+.tab-selected { color: #b67862; }
+.tab-dot { background-color: #b67862; height: 3px; width: 3px; border-radius: 2px; margin-top: 4px; }
+.demo-bar { display: flex; flex-direction: row; justify-content: space-between; padding: 8px 22px; background-color: #eee9dc; }
+.demo-label { font-size: 10px; color: #998872; }
+.demo-action { font-size: 10px; color: #a26c54; }
+.chat-end { height: 12px; }
+</style>
