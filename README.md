@@ -25,6 +25,12 @@ Supabase 初始化、账号白名单、权限和接口说明见 [supabase/README
 
 真正接入前还需开通 DCloud 推送服务，完成应用包名、签名和相关厂商通道/资质配置，并让客户端注册、上报 CID。服务端密钥只存放在服务端密钥管理环境，不得写入 App。具体边界、数据绑定和交付验收建议见 [docs/background-notifications.md](docs/background-notifications.md)。没有推送凭据与配置时，不发送通知，也不应宣称功能已完成。
 
+## 源码约定
+
+所有手写页面和组件的样式使用 SCSS，共享样式位于 `pages/index/styles/shared.scss`；`uni.scss` 提供全局主题变量和弹性布局 mixin。通过 HBuilderX 管理的 `compile-dart-sass` 插件编译，无需在项目内额外安装 Sass 依赖。样式保持独立类选择器，并显式定义弹性布局方向。
+
+手写 TypeScript 中的自定义函数统一使用箭头函数。组件状态、组合式逻辑、工具方法及局部变量附有中文用途注释；`unpackage` 为自动生成的编译产物，不手工维护。
+
 ## 编译与验收状态
 
-项目曾通过 HBuilderX 5.34 Android Vapor 编译。近期样式 CSS 警告正在修复，最终编译验证尚未完成；也没有完成真机验收。Supabase 登录、RLS、媒体上传下载、双设备 Realtime、后台推送均未完成线上/真机验收。编译通过不代表这些功能已验收。
+SCSS 迁移、箭头函数转换及中文注释补充后，已通过 HBuilderX 5.34 Android Vapor 字节码编译，本次编译日志无警告。尚未完成真机验收；Supabase 登录、RLS、媒体上传下载、双设备 Realtime、后台推送均未完成线上/真机验收。编译通过不代表这些功能已验收。

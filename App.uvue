@@ -1,21 +1,26 @@
 <script setup>
 	// #ifdef APP-ANDROID || APP-HARMONY
+	// 首次返回的时间戳，用于判断是否在两秒内再次退出。
 	let firstBackTime = 0
 	// #endif
 
+	/** 应用启动时记录生命周期日志。 */
 	onLaunch(() => {
 		console.log('App Launch')
 	})
 
+	/** 应用进入前台时记录日志。 */
 	onAppShow(() => {
 		console.log('App Show')
 	})
 
+	/** 应用进入后台时记录日志。 */
 	onAppHide(() => {
 		console.log('App Hide')
 	})
 
 	// #ifdef APP-ANDROID || APP-HARMONY
+	/** 在最后一页处理连续两次返回退出。 */
 	onLastPageBackPress(() => {
 		console.log('App LastPageBackPress')
 		if (firstBackTime == 0) {
@@ -24,6 +29,7 @@
 				position: 'bottom',
 			})
 			firstBackTime = Date.now()
+			/** 超时后重置首次返回时间。 */
 			setTimeout(() => {
 				firstBackTime = 0
 			}, 2000)
@@ -33,13 +39,14 @@
 		}
 	})
 
+	/** 应用退出时记录日志。 */
 	onExit(() => {
 		console.log('App Exit')
 	})
 	// #endif
 </script>
 
-<style>
+<style lang="scss">
 	/*每个页面公共css */
 	.uni-row {
 		flex-direction: row;

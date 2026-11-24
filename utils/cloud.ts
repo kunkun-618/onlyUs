@@ -1,6 +1,7 @@
 import { reactive } from 'vue'
 import { inspectMedia, validateMedia, mediaExtension, type MediaMetadata } from './media'
 
+/** 云连接响应式状态：项目地址、公开密钥、登录会话和实时连接状态。 */
 export const cloud = reactive({
   url: String(uni.getStorageSync('pair_url') || ''),
   key: String(uni.getStorageSync('pair_key') || ''),
@@ -8,22 +9,35 @@ export const cloud = reactive({
   status: '未连接'
 })
 
-export function configured() { return cloud.url.length > 0 && cloud.key.length > 0 }
+/** 判断是否已填写项目地址和公开密钥。 */
+export const configured = () => { return cloud.url.length > 0 && cloud.key.length > 0 }
+
+// 会话变更版本号，用于拦截旧会话的异步结果。
 let authVersion = 0
-export function saveConfig(url: string, key: string) {
+
+/** 校验并保存云配置，同时清除旧登录会话。 */
+export const saveConfig = (url: string, key: string) => {
+  // 去除空白及末尾斜杠的项目地址。
   const clean = url.trim().replace(/\/+$/, '')
   if (!/^https:\/\/[a-zA-Z0-9.-]+(?::\d+)?$/.test(clean)) throw new Error('请输入有效的 HTTPS 项目地址')
+  // 去除首尾空白后用于验证的公开密钥。
   const cleanKey = key.trim()
   if (!cleanKey.startsWith('sb_publishable_')) {
+    // JWT 中待解码的载荷片段。
     const payload = cleanKey.split('.')[1] || ''
+    // 用于手动解码载荷的 Base64 字符表。
     const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+    // bits 为待消费位数，value 为位缓冲，decoded 为解码后的载荷文本。
     let bits = 0, value = 0, decoded = ''
+    // char 为转换成标准 Base64 后逐个读取的载荷字符。
     for (const char of payload.replace(/-/g, '+').replace(/_/g, '/')) {
+      // 当前字符对应的六位数值，无效字符会被跳过。
       const digit = alphabet.indexOf(char)
       if (digit < 0) continue
       value = (value << 6) | digit; bits += 6
       if (bits >= 8) { bits -= 8; decoded += String.fromCharCode((value >> bits) & 255) }
     }
+    // 从载荷读取的角色，仅允许匿名公开角色。
     let role = ''
     try { role = JSON.parse(decoded).role } catch (_) {}
     if (role !== 'anon') throw new Error('只允许 anon JWT 或 sb_publishable_ 公开密钥')
@@ -35,7 +49,9 @@ export function saveConfig(url: string, key: string) {
   uni.setStorageSync('pair_key', cloud.key)
 }
 
-function raw(path: string, method: string = 'GET', data: any = undefined, token: string = ''): Promise<any> {
+/** 使用指定令牌发送云请求，未指定时使用公开密钥。 */
+const raw = (path: string, method: string = 'GET', data: any = undefined, token: string = ''): Promise<any> => {
+  // resolve 返回响应数据，reject 传递接口或网络错误。
   return new Promise((resolve, reject) => {
     uni.request({
       url: cloud.url + path,
@@ -43,6 +59,7 @@ function raw(path: string, method: string = 'GET', data: any = undefined, token:
       timeout: 15000,
       data,
       header: { apikey: cloud.key, Authorization: 'Bearer ' + (token || cloud.key), 'Content-Type': 'application/json', Prefer: 'return=representation' },
+      // r 为包含状态码和业务数据的请求响应。
       success: (r: any) => {
         if (r.statusCode >= 200 && r.statusCode < 300) resolve(r.data)
         else reject(new Error(r.data?.msg || r.data?.message || r.data?.error_description || r.data?.error || '请求失败 ' + r.statusCode))
@@ -52,16 +69,21 @@ function raw(path: string, method: string = 'GET', data: any = undefined, token:
   })
 }
 
+// 并发请求共用的会话刷新任务，避免重复刷新令牌。
 let refreshing: Promise<any> | null = null
-function persistSession(session: any) {
+/** 更新响应式会话并将绝对过期时间写入本地存储。 */
+const persistSession = (session: any) => {
   cloud.session = { ...session, expires_at: Date.now() + session.expires_in * 1000 }
   uni.setStorageSync('pair_session', cloud.session)
 }
-export async function token(): Promise<string> {
+/** 获取有效访问令牌，会话即将过期时合并刷新请求。 */
+export const token = async (): Promise<string> => {
   if (!cloud.session) throw new Error('请先登录')
   if (cloud.session.expires_at < Date.now() + 60000) {
     if (!refreshing) {
+      // 刷新开始时的会话版本，防止覆盖后续登录状态。
       const version = authVersion
+      // 当前刷新任务；session 为服务端返回的新会话，结束时仅清理自身任务。
       const task = raw('/auth/v1/token?grant_type=refresh_token', 'POST', { refresh_token: cloud.session.refresh_token })
         .then(session => { if (version !== authVersion) throw new Error('登录会话已变更'); persistSession(session) })
         .finally(() => { if (refreshing === task) refreshing = null })
@@ -72,45 +94,68 @@ export async function token(): Promise<string> {
   if (!cloud.session) throw new Error('请重新登录')
   return cloud.session.access_token
 }
-export async function request(path: string, method: string = 'GET', data: any = undefined) {
+/** 携带登录令牌请求接口，并校验请求期间会话未发生变化。 */
+export const request = async (path: string, method: string = 'GET', data: any = undefined) => {
+  // 请求开始时的会话版本。
   const version = authVersion
+  // 已获取或刷新后的访问令牌。
   const access = await token()
   if (version !== authVersion) throw new Error('登录会话已变更')
+  // 等待会话一致性校验后才能返回的接口结果。
   const result = await raw(path, method, data, access)
   if (version !== authVersion) throw new Error('登录会话已变更')
   return result
 }
-export async function login(email: string, password: string) {
+
+/** 使用邮箱密码登录，并确认账号属于双人成员名单。 */
+export const login = async (email: string, password: string) => {
   clearSession()
+  // 清除旧会话后本次登录对应的版本。
   const version = authVersion
+  // 密码认证取得的登录会话。
   const session = await raw('/auth/v1/token?grant_type=password', 'POST', { email: email.trim(), password })
   if (version !== authVersion) throw new Error('登录会话已变更')
   persistSession(session)
   try {
+    // 可访问的成员记录；m 为用于核对当前账号的单条成员记录。
     const members = await request('/rest/v1/app_members?select=*')
     if (!members.some((m: any) => m.user_id === session.user.id)) throw new Error('该账号不在双人成员名单内')
   } catch (e) { clearSession(); throw e }
 }
-export function clearSession() {
+
+/** 使旧异步任务失效，并清除内存与本地存储中的会话。 */
+export const clearSession = () => {
   authVersion++
   refreshing = null
   cloud.session = null
   uni.removeStorageSync('pair_session')
 }
-export async function logout() {
+/** 尝试注销服务端会话，无论结果如何均清除本地登录状态。 */
+export const logout = async () => {
   try { if (cloud.session) await request('/auth/v1/logout', 'POST') } finally { clearSession() }
 }
 
-export function watchChanges(onChange: (table: string, row: any) => void, onResync: () => void) {
+/** 订阅数据变更并自动重连；onChange 接收表名和记录，onResync 在订阅就绪时触发。 */
+export const watchChanges = (onChange: (table: string, row: any) => void, onResync: () => void) => {
+  // 是否已由调用方主动停止订阅。
   let stopped = false
+  // 当前实时连接实例。
   let socket: any = null
+  // 周期心跳定时器句柄。
   let heartbeat: any = null
+  // 等待重连的定时器句柄，同时用于避免重复安排重连。
   let reconnect: any = null
+  // 递增的协议消息引用编号。
   let ref = 0
+  // 当前重连等待时间，失败后指数增长，单位为毫秒。
   let delay = 1000
+  // 最近确认连接存活的时间戳。
   let lastHeartbeat = 0
+  // 需要订阅实时变更的业务表。
   const tables = ['messages', 'miss_you_logs', 'photos']
+  /** 将主题、事件和载荷封装成实时协议消息发送。 */
   const send = (topic: string, event: string, payload: any) => socket?.send({ data: JSON.stringify({ topic, event, payload, ref: String(++ref) }) })
+  /** 停止心跳并按退避间隔安排下一次连接。 */
   const schedule = () => {
     clearInterval(heartbeat)
     if (stopped || reconnect) return
@@ -118,14 +163,18 @@ export function watchChanges(onChange: (table: string, row: any) => void, onResy
     reconnect = setTimeout(() => { reconnect = null; connect() }, delay)
     delay = Math.min(delay * 2, 30000)
   }
+  /** 获取有效令牌并建立实时连接、订阅与心跳处理。 */
   const connect = async () => {
     try {
+      // 建立本轮订阅时使用的访问令牌。
       const access = await token()
       if (stopped) return
       cloud.status = '连接中'
+      // 当前连接中已确认成功订阅的表数量。
       let joined = 0
       socket = uni.connectSocket({ url: cloud.url.replace('https:', 'wss:') + '/realtime/v1/websocket?apikey=' + encodeURIComponent(cloud.key) + '&vsn=1.0.0', complete: () => {} })
       socket.onOpen(() => {
+        // table 为逐个加入实时订阅的业务表名。
         for (const table of tables) send('realtime:pair-' + table, 'phx_join', {
           config: { broadcast: { self: false }, presence: { key: '' }, postgres_changes: [{ event: table === 'photos' ? '*' : 'INSERT', schema: 'public', table }] }, access_token: access
         })
@@ -133,14 +182,17 @@ export function watchChanges(onChange: (table: string, row: any) => void, onResy
         heartbeat = setInterval(async () => {
           try {
             if (Date.now() - lastHeartbeat > 60000) { socket.close({}); schedule(); return }
+            // 心跳时重新取得有效令牌，并同步到每个 table 对应的订阅。
             const fresh = await token()
             for (const table of tables) send('realtime:pair-' + table, 'access_token', { access_token: fresh })
             send('phoenix', 'heartbeat', {})
           } catch (_) { socket.close({}); schedule() }
         }, 25000)
       })
+      // message 为实时连接收到的原始消息。
       socket.onMessage((message: any) => {
         try {
+          // 解析后的实时协议帧，用于更新连接状态或分发数据变更。
           const frame = JSON.parse(message.data)
           if (frame.event === 'phx_reply' && frame.payload?.status === 'ok') lastHeartbeat = Date.now()
           if (frame.event === 'system') {
@@ -151,25 +203,32 @@ export function watchChanges(onChange: (table: string, row: any) => void, onResy
           }
           if (frame.event === 'postgres_changes') onChange(frame.payload.data.table, frame.payload.data.record)
           if (frame.event === 'phx_error' || (frame.event === 'phx_reply' && frame.payload?.status === 'error')) { socket.close({}); schedule() }
-        } catch (_) { /* Ignore non-protocol frames. */ }
+        } catch (_) { /* 忽略非协议格式的消息帧。 */ }
       })
       socket.onClose(schedule)
       socket.onError(schedule)
     } catch (_) { schedule() }
   }
   connect()
+  /** 停止订阅并清理心跳、重连任务和实时连接。 */
   return () => { stopped = true; clearInterval(heartbeat); clearTimeout(reconnect); socket?.close({}); cloud.status = '未连接' }
 }
 
-export async function uploadPhoto(filePath: string, metadata?: MediaMetadata) {
+/** 补齐图片元数据后调用通用媒体上传流程。 */
+export const uploadPhoto = async (filePath: string, metadata?: MediaMetadata) => {
   return uploadMedia(filePath, metadata || await inspectMedia(filePath, 'image'))
 }
-export async function uploadMedia(filePath: string, metadata: MediaMetadata) {
+/** 上传媒体并创建记录，失败时先核对记录再清理孤立文件。 */
+export const uploadMedia = async (filePath: string, metadata: MediaMetadata) => {
   validateMedia(metadata)
+  // 上传开始时的会话版本，用于保证文件与记录属于同一登录状态。
   const version = authVersion
+  // 上传存储对象所需的有效访问令牌。
   const access = await token()
   if (version !== authVersion) throw new Error('登录会话已变更')
+  // 按账号隔离并附加时间与随机后缀的存储对象路径。
   const path = cloud.session.user.id + '/' + Date.now() + '_' + Math.random().toString(36).slice(2) + '.' + mediaExtension(metadata.mime_type)
+  // resolve 表示文件上传成功，reject 传递错误；r 为上传接口响应。
   await new Promise<void>((resolve, reject) => uni.uploadFile({
     url: cloud.url + '/storage/v1/object/photos/' + path, filePath, name: 'file',
     header: { apikey: cloud.key, Authorization: 'Bearer ' + access, 'x-upsert': 'false' },
@@ -185,20 +244,26 @@ export async function uploadMedia(filePath: string, metadata: MediaMetadata) {
     })
   } catch (e) {
     if (version !== authVersion) throw e
-    // A timed-out metadata insert may have committed; never delete its object blindly.
+    // e 为记录写入异常；超时请求可能已提交，确认无记录前不能直接删除存储对象。
+    // 查询同一路径下可能已成功提交的媒体记录。
     const rows = await request('/rest/v1/photos?storage_path=eq.' + encodeURIComponent(path))
     if (rows.length) return rows
     await request('/storage/v1/object/photos', 'DELETE', { prefixes: [path] })
     throw e
   }
 }
-export async function downloadPhoto(path: string): Promise<string> {
+/** 通过通用鉴权下载流程获取图片临时路径。 */
+export const downloadPhoto = async (path: string): Promise<string> => {
   return downloadMedia(path)
 }
-export async function downloadMedia(path: string): Promise<string> {
+/** 携带访问令牌下载私有媒体，并拒绝会话变化后的下载结果。 */
+export const downloadMedia = async (path: string): Promise<string> => {
+  // 下载开始时的会话版本。
   const version = authVersion
+  // 访问私有媒体存储对象的有效令牌。
   const access = await token()
   if (version !== authVersion) throw new Error('登录会话已变更')
+  // resolve 返回临时文件路径，reject 传递下载错误；r 为下载接口响应。
   return new Promise((resolve, reject) => uni.downloadFile({
     url: cloud.url + '/storage/v1/object/authenticated/photos/' + path.split('/').map(encodeURIComponent).join('/'),
     header: { apikey: cloud.key, Authorization: 'Bearer ' + access },

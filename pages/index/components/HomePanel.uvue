@@ -29,7 +29,7 @@
         </view>
       </view>
       <text class="miss-title">{{ heartActive ? '把想念，送到你身边' : '我有一点，想你了' }}</text>
-      <text class="miss-hint">{{ demo ? '轻触爱心，记录这一刻的想念' : '轻触爱心，向对方发送一份想念' }}</text>
+      <text class="miss-hint">轻触爱心，向对方发送一份想念</text>
       <view class="miss-footer">
         <text class="miss-count">今天的小想念</text>
         <text class="miss-number">{{ todayMiss }} 次</text>
@@ -135,28 +135,46 @@
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { usePairContext } from '../composables/context'
 import { cloud, request } from '../../../utils/cloud'
+// 首页使用的共享状态与业务方法上下文。
 const context = usePairContext()
-const { today, myName, partnerName, sendMiss, heartActive, demo, todayMiss, switchTab, latestMiss, userId, formatTime, misses } = context
+// 取得日期、双方身份、想念互动与统计、导航和时间格式化所需的状态及方法。
+const { today, myName, partnerName, sendMiss, heartActive, todayMiss, switchTab, latestMiss, userId, formatTime, misses } = context
+/** 复制当天想念记录，供首页展示。 */
 const todayRecords = computed(() => [...context.todayMisses.value])
+// 历史记录弹窗的显示状态。
 const historyOpen = ref(false)
+// 日期筛选表单中的起始日期。
 const startDate = ref('')
+// 日期筛选表单中的截止日期。
 const endDate = ref('')
+// 发送者筛选选项：全部、自己或对方。
 const senderFilter = ref('all')
+// 当前查询已经加载的历史记录，按倒序累积分页。
 const historyRows = ref<any[]>([])
+// 历史分页请求的加载状态，避免重复请求。
 const historyLoading = ref(false)
+// 当前页是否满额，用于提示仍可加载下一页。
 const historyMore = ref(false)
+// 日期校验或历史加载失败时展示的提示。
 const historyError = ref('')
+// 是否使用适合矮屏的紧凑弹窗布局。
 const compactModal = ref(uni.getWindowInfo().windowHeight < 540)
+// 查询代次，筛选、关闭或身份变化后使旧请求失效。
 let historyGeneration = 0
+// 本轮查询绑定的项目、密钥、用户及演示模式快照。
 let historyScope = ''
+// 已提交的筛选快照，防止输入变动影响后续分页。
 let activeFilters = { start: '', end: '', sender: 'all' }
-function currentScope() { return JSON.stringify([cloud.url, cloud.key, userId.value, demo.value]) }
-function closeHistory() {
+/** 生成当前连接与身份作用域，用于隔离异步查询结果。 */
+const currentScope = () => { return JSON.stringify([cloud.url, cloud.key, userId.value]) }
+/** 关闭历史弹窗并使未完成的查询失效。 */
+const closeHistory = () => {
   historyOpen.value = false
   historyGeneration++
   historyLoading.value = false
 }
-function openHistory() {
+/** 重置历史筛选与结果并打开弹窗查询。 */
+const openHistory = () => {
   historyOpen.value = true
   startDate.value = ''
   endDate.value = ''
@@ -166,18 +184,23 @@ function openHistory() {
   historyError.value = ''
   runHistoryQuery()
 }
-function validDate(value: string) {
+/** 校验可选日期的格式及实际日历有效性。 */
+const validDate = (value: string) => {
   if (!value) return true
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  // 按本地零点解析日期，核对是否发生无效日期进位。
   const date = new Date(value + 'T00:00:00')
   return Number.isFinite(date.getTime()) && date.getFullYear() === Number(value.slice(0, 4)) && date.getMonth() + 1 === Number(value.slice(5, 7)) && date.getDate() === Number(value.slice(8, 10))
 }
-function localDayAfter(value: string) {
+/** 返回指定本地日期次日零点的标准时间，作为截止上界。 */
+const localDayAfter = (value: string) => {
+  // 可递增到次日的本地日期对象。
   const date = new Date(value + 'T00:00:00')
   date.setDate(date.getDate() + 1)
   return date.toISOString()
 }
-function runHistoryQuery() {
+/** 校验并提交筛选条件，开启新一轮历史分页。 */
+const runHistoryQuery = () => {
   if (!validDate(startDate.value) || !validDate(endDate.value)) { historyError.value = '日期格式或日期值无效，请使用 YYYY-MM-DD'; return }
   if (startDate.value && endDate.value && startDate.value > endDate.value) { historyError.value = '开始日期不能晚于结束日期'; return }
   historyGeneration++
@@ -189,30 +212,29 @@ function runHistoryQuery() {
   historyLoading.value = false
   loadHistoryPage()
 }
-async function loadHistoryPage() {
+/** 按固定筛选和末条游标加载历史，只接收当前作用域的结果。 */
+const loadHistoryPage = async () => {
   if (historyLoading.value) return
+  // 请求发起时的查询代次，用于排除旧查询响应。
   const generation = historyGeneration
+  // 本次分页所属的连接与身份作用域。
   const scope = historyScope
+  // 取得已提交的起止日期与发送者，保持各页筛选一致。
   const { start, end, sender } = activeFilters
+  // 已加载的末条记录，以时间和标识组成稳定的分页游标。
   const cursor = historyRows.value[historyRows.value.length - 1]
   historyLoading.value = true
   try {
+    // 本页从演示缓存或云端取得的记录。
     let rows: any[]
-    if (demo.value) {
-      const cache = uni.getStorageSync('pair_demo')
-      rows = (cache?.misses || misses.value).filter((item: any) => {
-        const timestamp = Date.parse(item.created_at)
-        const senderMatch = sender === 'all' || item.sender_id === (sender === 'me' ? userId.value : partnerId())
-        return (!start || timestamp >= new Date(start + 'T00:00:00').getTime()) && (!end || timestamp < new Date(localDayAfter(end)).getTime()) && senderMatch && (!cursor || item.created_at < cursor.created_at || (item.created_at === cursor.created_at && String(item.id) < String(cursor.id)))
-      }).sort((a: any, b: any) => b.created_at.localeCompare(a.created_at) || String(b.id).localeCompare(String(a.id))).slice(0, 50)
-    } else {
+      // 云端分页的排序、数量及可选筛选参数。
       const filters = ['select=*', 'order=created_at.desc,id.desc', 'limit=50']
       if (start) filters.push('created_at=gte.' + encodeURIComponent(new Date(start + 'T00:00:00').toISOString()))
       if (end) filters.push('created_at=lt.' + encodeURIComponent(localDayAfter(end)))
       if (sender !== 'all') filters.push('sender_id=eq.' + encodeURIComponent(sender === 'me' ? userId.value : partnerId()))
       if (cursor) filters.push('or=' + encodeURIComponent('(created_at.lt.' + cursor.created_at + ',and(created_at.eq.' + cursor.created_at + ',id.lt.' + cursor.id + '))'))
       rows = await request('/rest/v1/miss_you_logs?' + filters.join('&'))
-    }
+    
     if (generation !== historyGeneration || scope !== currentScope() || !historyOpen.value) return
     historyRows.value.push(...rows)
     historyMore.value = rows.length === 50
@@ -222,83 +244,350 @@ async function loadHistoryPage() {
     if (generation === historyGeneration) historyLoading.value = false
   }
 }
-function partnerId() { return demo.value ? 'demo-partner' : context.members.value.find((member: any) => member.user_id !== userId.value)?.user_id || '' }
-watch(() => currentScope(), () => {
+/** 获取演示或真实成员列表中的对方用户标识。 */
+const partnerId = () => { return context.members.value.find(/** 查找非当前用户的成员。 */ (member: any) => member.user_id !== userId.value)?.user_id || '' }
+watch(/** 监听连接与身份作用域。 */ () => currentScope(), /** 清除旧作用域结果，并按需重新查询。 */ () => {
   historyGeneration++
   historyRows.value = []
   historyMore.value = false
   historyLoading.value = false
   if (historyOpen.value) { historyScope = currentScope(); runHistoryQuery() }
 })
-watch(() => uni.getWindowInfo().windowHeight, height => { compactModal.value = height < 540 })
+watch(/** 读取窗口高度作为监听值。 */ () => uni.getWindowInfo().windowHeight, /** 根据新高度更新紧凑布局。 */ height => { compactModal.value = height < 540 })
+/** 卸载时使尚未完成的历史请求失效。 */
 onUnmounted(() => { historyGeneration++ })
 </script>
 
-<style>
-@import '../styles/shared.css';
-.couple-row { display: flex; flex-direction: row; justify-content: center; align-items: center; padding: 28px 0 22px; }
-.person { display: flex; flex-direction: column; align-items: center; }
-.sage { background-color: #dfe6db; }
-.sage-text { color: #7b8b70; }
-.person-name { color: #5c5147; font-size: 13px; margin-top: 8px; }
-.person-role { color: #b5aaa0; font-size: 10px; margin-top: 4px; }
-.connection { display: flex; flex-direction: column; align-items: center; width: 128px; padding-bottom: 24px; }
-.connection-line { color: #c89583; font-size: 17px; letter-spacing: 2px; }
-.connection-caption { color: #b5a497; font-size: 10px; margin-top: 8px; }
-.miss-card { display: flex; flex-direction: column; align-items: center; padding: 24px 14px 0; background-color: #f3e7de; border: 1px solid #eee0d5; border-radius: 20px; }
-.miss-kicker { color: #a88b78; font-size: 11px; letter-spacing: 2px; }
-.heart-orbit { width: 166px; height: 166px; border: 1px solid #e9d3c5; border-radius: 84px; display: flex; flex-direction: column; align-items: center; justify-content: center; margin: 22px 0 17px; }
-.heart-middle { width: 140px; height: 140px; border-radius: 72px; background-color: #edd9cb; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-.heart-button { width: 110px; height: 110px; border-radius: 58px; background-color: #bd7966; display: flex; flex-direction: column; align-items: center; justify-content: center; box-shadow: 0 7px 16px #d5b09e; }
-.heart-active { background-color: #a95e50; transform: scale(1.08); }
-.heart-symbol { font-size: 53px; color: #fff8ee; }
-.miss-title { color: #745646; font-size: 21px; font-weight: 600; letter-spacing: 1px; }
-.miss-hint { color: #b29785; font-size: 10px; margin-top: 9px; }
-.miss-footer { align-self: stretch; display: flex; flex-direction: row; align-items: center; justify-content: center; margin-top: 25px; border-top: 1px solid #e8d6c9; padding: 15px 0; }
-.miss-count { color: #ab8b76; font-size: 10px; }
-.miss-number { color: #a66a54; font-size: 12px; font-weight: 600; margin-left: 8px; }
-.miss-divider { color: #d3bcaa; font-size: 12px; margin: 0 14px; }
-.shortcut-row { display: flex; flex-direction: row; }
-.shortcut { flex: 1; padding: 16px 14px; border-radius: 13px; border: 1px solid #eee3d9; }
-.chat-shortcut { background-color: #f7efe5; margin-right: 11px; }
-.photo-shortcut { background-color: #eef0e8; border-color: #e2e5da; }
-.shortcut-icon { font-size: 35px; color: #ba8e69; height: 38px; }
-.green { color: #8b967b; }
-.shortcut-title { color: #5a5045; font-size: 14px; font-weight: 600; line-height: 23px; }
-.shortcut-sub { color: #aa9a89; font-size: 10px; line-height: 21px; }
-.shortcut-arrow { font-size: 10px; color: #a78569; margin-top: 15px; }
-.note-entry { display: flex; flex-direction: row; align-items: center; background-color: #f5f0e8; border: 1px solid #ece5db; padding: 16px 13px; border-radius: 12px; margin-top: 12px; }
-.note-entry-icon { width: 37px; height: 39px; border-radius: 9px; background-color: #ebe0d0; justify-content: center; align-items: center; display: flex; flex-direction: column; margin-right: 12px; }
-.note-icon { color: #a78e6f; font-size: 25px; }
-.note-arrow { font-size: 20px; color: #b3a28d; }
-.activity-card { display: flex; flex-direction: row; align-items: center; padding: 16px; background-color: #fffdfa; border: 1px solid #eee7de; border-radius: 12px; }
-.activity-dot { width: 7px; height: 7px; background-color: #bd8a74; border-radius: 4px; margin-right: 12px; }
-.activity-title { font-size: 12px; color: #726355; line-height: 22px; }
-.activity-heart { color: #c89583; font-size: 18px; }
-.today-history { margin-top: 8px; }
-.history-heading { margin-bottom: 8px; }
-.history-link { padding: 4px 0; }
-.today-list { display: flex; flex-direction: column; padding: 0 14px; background-color: #fffdfa; border: 1px solid #eee7de; border-radius: 12px; }
-.today-row, .history-row { display: flex; flex-direction: row; align-items: center; padding: 12px 0; border-bottom: 1px solid #f0e9df; }
-.row-last { border-bottom-width: 0; }
-.today-heart { margin-right: 12px; }
-.today-empty { justify-content: center; min-height: 54px; padding: 10px; }
-.history-modal { display: flex; flex-direction: column; height: 460px; padding: 20px; }
-.history-modal-compact { height: 300px; padding: 16px; }
-.history-top { display: flex; flex-direction: row; align-items: center; justify-content: space-between; }
-.modal-title { margin: 5px 0 10px; }
-.history-close { color: #927d6d; font-size: 26px; padding: 0 4px; }
-.field-label { margin: 10px 0 7px; }
-.date-row { display: flex; flex-direction: row; align-items: center; }
-.history-input { flex: 1; min-width: 0; padding: 0 8px; font-size: 11px; }
-.date-separator { color: #927d6d; font-size: 11px; padding: 0 7px; }
-.sender-row { display: flex; flex-direction: row; }
-.sender-option { flex: 1; text-align: center; padding: 9px 0; margin-right: 8px; border-radius: 8px; background-color: #f6f0e8; color: #927d6d; font-size: 12px; }
-.sender-last { margin-right: 0; }
-.sender-selected { background-color: #ead9cc; color: #8c5f4e; }
-.history-submit { margin: 12px 0 6px; }
-.history-row { padding: 10px 2px; }
-.history-error { color: #ae5749; font-size: 11px; line-height: 18px; }
-.history-empty, .history-status { color: #a79d93; font-size: 11px; padding: 16px 0; text-align: center; }
-.history-more, .history-dismiss { padding: 9px 0; }
+<style lang="scss">
+@import '../styles/shared.scss';
+
+.couple-row {
+  @include pair-flex(row, center, center);
+  padding: 28px 0 22px;
+}
+.person {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.sage {
+  background-color: #dfe6db;
+}
+.sage-text {
+  color: #7b8b70;
+}
+.person-name {
+  color: #5c5147;
+  font-size: 13px;
+  margin-top: 8px;
+}
+.person-role {
+  color: #b5aaa0;
+  font-size: 10px;
+  margin-top: 4px;
+}
+.connection {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 128px;
+  padding-bottom: 24px;
+}
+.connection-line {
+  color: #c89583;
+  font-size: 17px;
+  letter-spacing: 2px;
+}
+.connection-caption {
+  color: #b5a497;
+  font-size: 10px;
+  margin-top: 8px;
+}
+.miss-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 24px 14px 0;
+  background-color: #f3e7de;
+  border: 1px solid #eee0d5;
+  border-radius: 20px;
+}
+.miss-kicker {
+  color: #a88b78;
+  font-size: 11px;
+  letter-spacing: 2px;
+}
+.heart-orbit {
+  width: 166px;
+  height: 166px;
+  border: 1px solid #e9d3c5;
+  border-radius: 84px;
+  @include pair-flex(column, center, center);
+  margin: 22px 0 17px;
+}
+.heart-middle {
+  width: 140px;
+  height: 140px;
+  border-radius: 72px;
+  background-color: #edd9cb;
+  @include pair-flex(column, center, center);
+}
+.heart-button {
+  width: 110px;
+  height: 110px;
+  border-radius: 58px;
+  background-color: #bd7966;
+  @include pair-flex(column, center, center);
+  box-shadow: 0 7px 16px #d5b09e;
+}
+.heart-active {
+  background-color: #a95e50;
+  transform: scale(1.08);
+}
+.heart-symbol {
+  font-size: 53px;
+  color: #fff8ee;
+}
+.miss-title {
+  color: #745646;
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: 1px;
+}
+.miss-hint {
+  color: #b29785;
+  font-size: 10px;
+  margin-top: 9px;
+}
+.miss-footer {
+  align-self: stretch;
+  @include pair-flex(row, center, center);
+  margin-top: 25px;
+  border-top: 1px solid #e8d6c9;
+  padding: 15px 0;
+}
+.miss-count {
+  color: #ab8b76;
+  font-size: 10px;
+}
+.miss-number {
+  color: #a66a54;
+  font-size: 12px;
+  font-weight: 600;
+  margin-left: 8px;
+}
+.miss-divider {
+  color: #d3bcaa;
+  font-size: 12px;
+  margin: 0 14px;
+}
+.shortcut-row {
+  display: flex;
+  flex-direction: row;
+}
+.shortcut {
+  flex: 1;
+  padding: 16px 14px;
+  border-radius: 13px;
+  border: 1px solid #eee3d9;
+}
+.chat-shortcut {
+  background-color: #f7efe5;
+  margin-right: 11px;
+}
+.photo-shortcut {
+  background-color: #eef0e8;
+  border-color: #e2e5da;
+}
+.shortcut-icon {
+  font-size: 35px;
+  color: #ba8e69;
+  height: 38px;
+}
+.green {
+  color: #8b967b;
+}
+.shortcut-title {
+  color: #5a5045;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 23px;
+}
+.shortcut-sub {
+  color: #aa9a89;
+  font-size: 10px;
+  line-height: 21px;
+}
+.shortcut-arrow {
+  font-size: 10px;
+  color: #a78569;
+  margin-top: 15px;
+}
+.note-entry {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  background-color: #f5f0e8;
+  border: 1px solid #ece5db;
+  padding: 16px 13px;
+  border-radius: 12px;
+  margin-top: 12px;
+}
+.note-entry-icon {
+  width: 37px;
+  height: 39px;
+  border-radius: 9px;
+  background-color: #ebe0d0;
+  @include pair-flex(column, center, center);
+  margin-right: 12px;
+}
+.note-icon {
+  color: #a78e6f;
+  font-size: 25px;
+}
+.note-arrow {
+  font-size: 20px;
+  color: #b3a28d;
+}
+.activity-card {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  padding: 16px;
+  background-color: #fffdfa;
+  border: 1px solid #eee7de;
+  border-radius: 12px;
+}
+.activity-dot {
+  width: 7px;
+  height: 7px;
+  background-color: #bd8a74;
+  border-radius: 4px;
+  margin-right: 12px;
+}
+.activity-title {
+  font-size: 12px;
+  color: #726355;
+  line-height: 22px;
+}
+.activity-heart {
+  color: #c89583;
+  font-size: 18px;
+}
+.today-history {
+  margin-top: 8px;
+}
+.history-heading {
+  margin-bottom: 8px;
+}
+.history-link {
+  padding: 4px 0;
+}
+.today-list {
+  display: flex;
+  flex-direction: column;
+  padding: 0 14px;
+  background-color: #fffdfa;
+  border: 1px solid #eee7de;
+  border-radius: 12px;
+}
+.today-row, .history-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  padding: 12px 0;
+  border-bottom: 1px solid #f0e9df;
+}
+.row-last {
+  border-bottom-width: 0;
+}
+.today-heart {
+  margin-right: 12px;
+}
+.today-empty {
+  justify-content: center;
+  min-height: 54px;
+  padding: 10px;
+}
+.history-modal {
+  display: flex;
+  flex-direction: column;
+  height: 460px;
+  padding: 20px;
+}
+.history-modal-compact {
+  height: 300px;
+  padding: 16px;
+}
+.history-top {
+  @include pair-flex(row, center, space-between);
+}
+.modal-title {
+  margin: 5px 0 10px;
+}
+.history-close {
+  color: #927d6d;
+  font-size: 26px;
+  padding: 0 4px;
+}
+.field-label {
+  margin: 10px 0 7px;
+}
+.date-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+}
+.history-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0 8px;
+  font-size: 11px;
+}
+.date-separator {
+  color: #927d6d;
+  font-size: 11px;
+  padding: 0 7px;
+}
+.sender-row {
+  display: flex;
+  flex-direction: row;
+}
+.sender-option {
+  flex: 1;
+  text-align: center;
+  padding: 9px 0;
+  margin-right: 8px;
+  border-radius: 8px;
+  background-color: #f6f0e8;
+  color: #927d6d;
+  font-size: 12px;
+}
+.sender-last {
+  margin-right: 0;
+}
+.sender-selected {
+  background-color: #ead9cc;
+  color: #8c5f4e;
+}
+.history-submit {
+  margin: 12px 0 6px;
+}
+.history-row {
+  padding: 10px 2px;
+}
+.history-error {
+  color: #ae5749;
+  font-size: 11px;
+  line-height: 18px;
+}
+.history-empty, .history-status {
+  color: $pair-color-muted;
+  font-size: 11px;
+  padding: 16px 0;
+  text-align: center;
+}
+.history-more, .history-dismiss {
+  padding: 9px 0;
+}
 </style>

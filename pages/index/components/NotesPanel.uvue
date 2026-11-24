@@ -32,18 +32,57 @@
 
 <script setup lang="ts">
 import { usePairContext } from '../composables/context'
+// 取得笔记筛选与列表、成员信息、分页状态，以及编辑、日期格式化、加载更多和导出方法。
 const { noteFilter, editNote, filteredNotes, formatDate, userId, partnerName, notesMore, loadMoreNotes, exportNotes } = usePairContext()
 </script>
 
-<style>
-@import '../styles/shared.css';
-.filter-row { display: flex; flex-direction: row; align-items: center; }
-.filter { font-size: 11px; color: #a69a8e; padding: 7px 10px; }
-.filter-active { color: #a97157; background-color: #eee2d3; border-radius: 7px; }
-.note-card { padding: 19px; border-radius: 13px; border: 1px solid #e9dfd0; background-color: #fffaf0; margin-bottom: 14px; }
-.note-meta { display: flex; flex-direction: row; justify-content: space-between; align-items: center; }
-.tag-private { background-color: #eee4dc; color: #a08d7f; }
-.note-title { color: #5f4d3d; font-size: 17px; font-weight: 600; margin: 16px 0 9px; }
-.note-excerpt { font-size: 12px; line-height: 23px; color: #9b8875; white-space: pre-wrap; }
-.note-author { color: #b9a38d; font-size: 10px; margin-top: 19px; }
+<style lang="scss">
+@import '../styles/shared.scss';
+
+.filter-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+}
+.filter {
+  font-size: 11px;
+  color: #a69a8e;
+  padding: 7px 10px;
+}
+.filter-active {
+  color: #a97157;
+  background-color: #eee2d3;
+  border-radius: 7px;
+}
+.note-card {
+  padding: 19px;
+  border-radius: 13px;
+  border: 1px solid #e9dfd0;
+  background-color: #fffaf0;
+  margin-bottom: 14px;
+}
+.note-meta {
+  @include pair-flex(row, center, space-between);
+}
+.tag-private {
+  background-color: #eee4dc;
+  color: #a08d7f;
+}
+.note-title {
+  color: #5f4d3d;
+  font-size: 17px;
+  font-weight: 600;
+  margin: 16px 0 9px;
+}
+.note-excerpt {
+  font-size: 12px;
+  line-height: 23px;
+  color: #9b8875;
+  white-space: pre-wrap;
+}
+.note-author {
+  color: #b9a38d;
+  font-size: 10px;
+  margin-top: 19px;
+}
 </style>

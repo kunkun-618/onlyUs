@@ -20,13 +20,36 @@
 
 <script setup lang="ts">
 import { usePairContext } from '../composables/context'
+// 取得笔记权限、编辑标识、表单与忙碌状态，以及关闭、保存和删除方法。
 const { noteReadOnly, editingId, closeNote, noteTitle, noteContent, noteShared, busy, saveNote, deleteNote } = usePairContext()
 </script>
 
-<style>
-@import '../styles/shared.css';
-.note-title-input { height: 48px; font-size: 20px; font-weight: 600; color: #65513f; border-bottom: 1px solid #ece2d5; }
-.note-textarea { height: 260px; width: 100%; font-size: 14px; color: #7e6c59; line-height: 26px; padding: 18px 0; }
-.visibility-row { display: flex; flex-direction: row; align-items: center; justify-content: space-between; padding: 12px 0; }
-.delete-note { color: #ae7767; font-size: 12px; text-align: center; padding: 15px; }
+<style lang="scss">
+@import '../styles/shared.scss';
+
+.note-title-input {
+  height: 48px;
+  font-size: 20px;
+  font-weight: 600;
+  color: #65513f;
+  border-bottom: 1px solid #ece2d5;
+}
+.note-textarea {
+  height: 260px;
+  width: 100%;
+  font-size: 14px;
+  color: #7e6c59;
+  line-height: 26px;
+  padding: 18px 0;
+}
+.visibility-row {
+  @include pair-flex(row, center, space-between);
+  padding: 12px 0;
+}
+.delete-note {
+  color: #ae7767;
+  font-size: 12px;
+  text-align: center;
+  padding: 15px;
+}
 </style>

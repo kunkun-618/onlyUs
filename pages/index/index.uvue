@@ -11,10 +11,6 @@
         <view class="avatar small" @click="tab = 'settings'"><text class="avatar-text">{{ myName.slice(0, 1) }}</text></view>
       </view>
       <scroll-view class="body" direction="vertical" :scroll-into-view="scrollTarget" :scroll-with-animation="true">
-        <view v-if="demo" class="demo-bar" @click="configOpen = true">
-          <text class="demo-label">本地演示 · 数据仅保存在此设备</text>
-          <text class="demo-action">连接云端 →</text>
-        </view>
         <HomePanel v-if="tab === 'home'" />
         <view v-else-if="tab === 'chat'" class="page">
           <ChatPanel />
@@ -49,37 +45,128 @@ import ChatComposer from './components/ChatComposer.uvue'
 import PhotosPanel from './components/PhotosPanel.uvue'
 import NotesPanel from './components/NotesPanel.uvue'
 import SettingsPanel from './components/SettingsPanel.uvue'
-import ConnectionDialog from './components/ConnectionDialog.uvue'
 import NoteEditor from './components/NoteEditor.uvue'
 
+// 页面共享的应用状态与业务方法，向子组件提供同一份上下文。
 const app = usePairApp()
 providePairContext(app)
-const { entered, tab, myName, scrollTarget, demo, configOpen, noteOpen, tabs, unread, switchTab } = app
+// 取得登录、导航、用户名称、滚动、演示及弹窗状态，以及页签配置、未读数和切换方法。
+const { entered, tab, myName, scrollTarget, configOpen, noteOpen, tabs, unread, switchTab } = app
 onShow(app.handleShow)
 onHide(app.handleHide)
 </script>
 
-<style>
-@import './styles/shared.css';
-.app { flex: 1; background-color: #faf8f5; }
-.login-host { flex: 1; }
-.shell { flex: 1; display: flex; flex-direction: column; }
-.topbar { display: flex; flex-direction: row; justify-content: space-between; align-items: center; padding: 18px 24px 14px; padding-top: calc(18px + env(safe-area-inset-top)); background-color: #faf8f5; border-bottom: 1px solid #eee8e1; }
-.brand { display: flex; flex-direction: row; align-items: center; }
-.brand-mark { color: #bb715f; font-size: 24px; margin-right: 9px; }
-.brand-name { color: #403831; font-size: 21px; font-weight: 700; letter-spacing: 2px; }
-.brand-en { color: #aaa097; font-size: 9px; letter-spacing: 2px; margin-left: 12px; padding-top: 5px; }
-.body { flex: 1; height: 0; }
-.small { width: 32px; height: 32px; border-radius: 18px; border-width: 1px; }
-.avatar-text { font-size: 13px; color: #926d59; }
-.tabbar { display: flex; flex-direction: row; justify-content: space-around; padding: 12px 8px 8px; padding-bottom: calc(8px + env(safe-area-inset-bottom)); background-color: #fffdf9; border-top: 1px solid #eee7df; }
-.tab-item { flex: 1; display: flex; flex-direction: column; align-items: center; height: 46px; }
-.tab-icon { font-size: 22px; color: #bcb3a9; height: 26px; }
-.tab-label { font-size: 10px; color: #aea499; margin-top: 2px; }
-.tab-selected { color: #b67862; }
-.tab-dot { background-color: #b67862; height: 3px; width: 3px; border-radius: 2px; margin-top: 4px; }
-.demo-bar { display: flex; flex-direction: row; justify-content: space-between; padding: 8px 22px; background-color: #eee9dc; }
-.demo-label { font-size: 10px; color: #998872; }
-.demo-action { font-size: 10px; color: #a26c54; }
-.chat-end { height: 12px; }
+<style lang="scss">
+@import './styles/shared.scss';
+
+.app {
+  flex: 1;
+  background-color: $pair-color-paper;
+}
+.login-host {
+  flex: 1;
+}
+.shell {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+.topbar {
+  @include pair-flex(row, center, space-between);
+  padding: 18px 24px 14px;
+  padding-top: calc(18px + env(safe-area-inset-top));
+  background-color: $pair-color-paper;
+  border-bottom: 1px solid #eee8e1;
+}
+.brand {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+}
+.brand-mark {
+  color: #bb715f;
+  font-size: 24px;
+  margin-right: 9px;
+}
+.brand-name {
+  color: #403831;
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: 2px;
+}
+.brand-en {
+  color: #aaa097;
+  font-size: 9px;
+  letter-spacing: 2px;
+  margin-left: 12px;
+  padding-top: 5px;
+}
+.body {
+  flex: 1;
+  height: 0;
+}
+.small {
+  width: 32px;
+  height: 32px;
+  border-radius: 18px;
+  border-width: 1px;
+}
+.avatar-text {
+  font-size: 13px;
+  color: #926d59;
+}
+.tabbar {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-around;
+  padding: 12px 8px 8px;
+  padding-bottom: calc(8px + env(safe-area-inset-bottom));
+  background-color: $pair-color-surface;
+  border-top: 1px solid #eee7df;
+}
+.tab-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: 46px;
+}
+.tab-icon {
+  font-size: 22px;
+  color: #bcb3a9;
+  height: 26px;
+}
+.tab-label {
+  font-size: 10px;
+  color: #aea499;
+  margin-top: 2px;
+}
+.tab-selected {
+  color: #b67862;
+}
+.tab-dot {
+  background-color: #b67862;
+  height: 3px;
+  width: 3px;
+  border-radius: 2px;
+  margin-top: 4px;
+}
+.demo-bar {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  padding: 8px 22px;
+  background-color: #eee9dc;
+}
+.demo-label {
+  font-size: 10px;
+  color: #998872;
+}
+.demo-action {
+  font-size: 10px;
+  color: #a26c54;
+}
+.chat-end {
+  height: 12px;
+}
 </style>

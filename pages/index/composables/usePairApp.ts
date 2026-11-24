@@ -2,490 +2,785 @@ import { computed, onUnmounted, ref } from 'vue'
 import { cloud, configured, saveConfig, login, logout, clearSession, request, watchChanges, uploadPhoto, downloadPhoto } from '../../../utils/cloud'
 import { readChatCache, writeChatCache, removeChatCache } from '../../../utils/chatCache'
 import { exportNoteFile } from '../../../utils/noteExport'
+import { SUPABASE_URL ,SUPABASE_PUBLISHABLE_KEY } from '../../../config/supabaseConfig'
 
-export function usePairApp() {
-  const tabs = [{ key: 'home', label: '我们', icon: '♥' }, { key: 'chat', label: '聊天', icon: '☏' }, { key: 'photos', label: '相册', icon: '▧' }, { key: 'notes', label: '笔记', icon: '✎' }, { key: 'settings', label: '设置', icon: '⚙' }]
-  const tab = ref('home')
-  const entered = ref(false)
-  const demo = ref(false)
-  const busy = ref(false)
-  const sending = ref(false)
-  const exporting = ref(false)
-  const now = ref(Date.now())
-  const email = ref('')
-  const password = ref('')
-  const messages = ref<any[]>([])
-  const misses = ref<any[]>([])
-  const notes = ref<any[]>([])
-  const photos = ref<any[]>([])
-  const members = ref<any[]>([])
-  const unread = ref(0)
-  const messageText = ref('')
-  const scrollTarget = ref('')
-  const heartActive = ref(false)
-  const hasMore = ref(false)
-  const loadingHistory = ref(false)
-  const notesMore = ref(false)
-  const photosMore = ref(false)
-  const photoFailed = ref<Record<string, boolean>>({})
-  const configOpen = ref(false)
-  const configUrl = ref(cloud.url)
-  const configKey = ref(cloud.key)
-  const noteOpen = ref(false)
-  const noteTitle = ref('')
-  const noteContent = ref('')
-  const noteShared = ref(false)
-  const editingId = ref('')
-  const noteReadOnly = ref(false)
-  const noteFilter = ref('all')
-  let originalNote = ''
-  let stopRealtime: (() => void) | null = null
-  let poll: any = null
-  let heartTimer: any = null
-  let refreshPromise: Promise<void> | null = null
-  let refreshAgain = false
-  let generation = 0
-  let synced: string | null = null
-  let chatInitialized = false
-  let signingOut = false
-  let lastRefresh = 0
-  let foreground = true
-  const photoLoading = new Set<string>()
-  const photoPaths = new Map<string, string>()
-  const userId = computed(() => demo.value ? 'demo-me' : cloud.session?.user.id || '')
-  const myName = computed(() => demo.value ? '小满' : members.value.find(m => m.user_id === userId.value)?.display_name || '我')
-  const partnerName = computed(() => demo.value ? '阿屿' : members.value.find(m => m.user_id !== userId.value)?.display_name || '你')
-  const today = computed(() => new Date(now.value).toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' }))
-  const todayMisses = computed(() => misses.value.filter(m => new Date(m.created_at).toDateString() === new Date(now.value).toDateString()))
-  const todayMiss = computed(() => todayMisses.value.length)
-  const latestMiss = computed(() => misses.value[0])
-  const filteredNotes = computed(() => notes.value.filter(n => noteFilter.value === 'all' || n.visibility === noteFilter.value))
-  function toast(title: string) { uni.showToast({ title, icon: 'none' }) }
-  function error(e: any) { toast(e?.message || '操作未完成，请稍后重试') }
-  function formatDate(value: string) { return new Date(value).toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' }) }
-  function formatTime(value: string) { return formatDate(value) + ' ' + new Date(value).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) }
-  function confirm(content: string): Promise<boolean> { return new Promise(resolve => uni.showModal({ title: '请确认', content, success: r => resolve(r.confirm), fail: () => resolve(false) })) }
-  function localId() { return 'local-' + Date.now() + '-' + Math.random().toString(36).slice(2) }
-  // Date preserves milliseconds only; retain the remaining Postgres fractional digits.
-  function compareMessages(a: any, b: any): number {
-    const milliseconds = Date.parse(a.created_at) - Date.parse(b.created_at)
-    const fraction = (value: string) => ((value.match(/\.(\d+)/)?.[1] || '').padEnd(9, '0')).slice(3, 9)
-    return milliseconds || fraction(a.created_at).localeCompare(fraction(b.created_at)) || a.id.localeCompare(b.id)
-  }
-  function persistChat() {
-    if (!demo.value && cloud.session) {
-      const ordered = [...messages.value].sort(compareMessages)
-      writeChatCache(cloud.url, userId.value, ordered.slice(-500), hasMore.value || ordered.length > 500, synced || undefined)
-    }
-  }
-  function removeCurrentChat() {
-    if (!demo.value && cloud.session) removeChatCache(cloud.url, userId.value)
-  }
-  function restoreChat() {
-    const cache = readChatCache(cloud.url, userId.value)
-    messages.value = cache ? [...cache.messages].sort(compareMessages) : []
-    hasMore.value = cache?.hasMore || false
-    synced = cache?.syncedAt || (messages.value.length ? messages.value[0].created_at : null)
-    chatInitialized = !!synced
-  }
-  function afterCursor(row: any) {
-    return 'or=' + encodeURIComponent('(created_at.gt.' + row.created_at + ',and(created_at.eq.' + row.created_at + ',id.gt.' + row.id + '))')
-  }
-  function persistDemo() { if (demo.value) uni.setStorageSync('pair_demo', { messages: messages.value, misses: misses.value, notes: notes.value, photos: photos.value }) }
-  function bottom() { const revision = generation; scrollTarget.value = ''; setTimeout(() => { if (revision === generation) scrollTarget.value = 'chat-end' }, 100) }
-  function switchTab(key: string) {
-    if (tab.value === key) return
-    tab.value = key
-    if (key === 'chat') { unread.value = 0; bottom() }
-    if (key === 'photos' && !demo.value) hydratePhotos()
-    if (!demo.value && Date.now() - lastRefresh > 30000) refreshAll()
-  }
-  function startDemo() {
-    if (signingOut) return
-    clearSession()
-    resetData()
-    demo.value = true
-    entered.value = true
-    const cache = uni.getStorageSync('pair_demo')
-    const now = new Date().toISOString()
-    messages.value = cache?.messages || [{ id: 'welcome', sender_id: 'demo-partner', content: '把想说的话都放在这里吧，日常的小事也想听你说。', created_at: now }]
-    misses.value = cache?.misses || []
-    notes.value = cache?.notes || [{ id: 'first-note', owner_id: 'demo-me', title: '我们的小小约定', content: '好好吃饭，慢慢生活。\n看到好看的天空，就拍下来给对方。\n有想念的时候，就按一下那颗爱心。', visibility: 'shared', created_at: now, updated_at: now }]
-    photos.value = cache?.photos || []
-    notesMore.value = false; photosMore.value = false; hasMore.value = false
-  }
-  
-  // 登入
-  const signIn = async() => {
-    // 不触发弹框，并修改为硬编码连接
-	  // if (!configured()) {
-	  // 	configOpen.value = true
-	  // 	return
-	  // }
-    cloud.url = 'https://uthkpblfagjhwyyldiby.supabase.co'
-    cloud.key = 'sb_publishable_F9tR-5VbKpwcY-alirLrlg_JoMOzq4o'
-    
-	  // 邮箱和密码空值校验
-	  if (!email.value.trim() || !password.value) {
-		  toast('请填写邮箱和密码')
-		  return
-	  }
+/** 创建双人空间的页面状态、数据同步与交互操作。 */
+export const usePairApp = () => {
+	// 底部导航的标识、名称与图标配置。
+	const tabs = [
+		{ key: 'home', label: '我们', icon: '♥' },
+		{ key: 'chat', label: '聊天', icon: '✉︎' },
+		{ key: 'photos', label: '相册', icon: '▧' },
+		{ key: 'notes', label: '笔记', icon: '✎' },
+		{ key: 'settings', label: '设置', icon: '👤︎' }
+	]
+	const tab = ref('home') // 当前选中的导航页签。
+	const entered = ref(false)  // 是否已进入登录后或演示模式的主界面。
+	const busy = ref(false) // 登录、笔记保存及照片添加等操作的忙碌状态。
+	const sending = ref(false)  // 消息发送锁，防止重复提交。
+	const exporting = ref(false)  // 笔记导出锁，防止重复导出。
+	const now = ref(Date.now()) // 驱动日期展示与跨日刷新的当前时间戳。
+	const email = ref('') // 登录表单中的邮箱。
+	const password = ref('')  // 登录表单中的密码。
+	const messages = ref<any[]>([]) // 按时间升序展示的聊天消息。
+	const misses = ref<any[]>([]) // 想念记录，供今日统计和最近记录展示使用。
+	const notes = ref<any[]>([])  // 当前已加载的笔记列表。
+	const photos = ref<any[]>([]) // 当前已加载的照片元数据及本地路径。
+	const members = ref<any[]>([])  // 双人空间的成员资料。
+	const unread = ref(0) // 非聊天页收到的未读消息数量。
+	const messageText = ref('') // 待发送的聊天输入内容。
+	const scrollTarget = ref('')  // 聊天滚动区域要定位的元素标识。
+	const heartActive = ref(false)  // 想念爱心的激活状态，同时限制连续发送。
+	const hasMore = ref(false)  // 聊天列表是否可能还有更早消息。
+	const loadingHistory = ref(false) // 是否正在加载更早的聊天消息。
+	const notesMore = ref(false)  // 笔记列表是否可能还有下一页。
+	const photosMore = ref(false) // 照片列表是否可能还有下一页。
+	const photoFailed = ref<Record<string, boolean>>({})  // 按照片标识记录下载失败状态，避免反复自动重试。
+	const noteOpen = ref(false) // 笔记编辑或阅读面板的显示状态。
+	const noteTitle = ref('') // 当前笔记表单的标题。
+	const noteContent = ref('') // 当前笔记表单的正文。
+	const noteShared = ref(false) // 当前笔记是否对另一位成员共享。
+	const editingId = ref('') // 正在编辑的笔记标识，空值表示新建。
+	const noteReadOnly = ref(false) // 是否仅允许阅读当前笔记。
+	const noteFilter = ref('all') // 笔记列表的可见性筛选条件。
+	let originalNote = '' // 打开笔记时的表单快照，用于检测未保存修改。
+	let stopRealtime: (() => void) | null = null  // 关闭当前实时订阅的清理函数。
+	let poll: any = null  // 定期刷新数据的轮询定时器。
+	let heartTimer: any = null  // 恢复爱心未激活状态的延时定时器。
+	let refreshPromise: Promise<void> | null = null // 正在执行的刷新任务，用于合并并发刷新。
+	let refreshAgain = false  // 当前刷新结束后是否还需补充刷新一次。
+	let generation = 0  // 数据代次，阻止重置前的异步结果写回当前状态。
+	let synced: string | null = null  // 聊天增量同步的时间游标。
+	let chatInitialized = false // 是否已完成聊天初始加载或恢复同步游标。
+	let signingOut = false  // 退出流程锁，避免退出期间再次登录或切换模式。
+	let lastRefresh = 0 // 上次成功刷新数据的时间戳。
+	let foreground = true // 页面是否处于前台，控制轮询与照片下载。	
+	const photoLoading = new Set<string>()  // 正在下载的照片标识集合，用于去重。
+	const photoPaths = new Map<string, string>()  // 照片标识到已下载本地路径的缓存。
+	
+	// 当前用户标识。
+	const userId = computed(() => cloud.session?.user.id || '')
+	// 从成员 m 中查找当前用户的显示名。
+	const myName = computed(() => members.value.find(m => m.user_id === userId.value)?.display_name || '我')
+	// 从成员 m 中查找另一位成员的显示名。
+	const partnerName = computed(() => members.value.find(m => m.user_id !== userId.value)?.display_name || '你')
+	// 首页展示的中文日期与星期。
+	const today = computed(() => new Date(now.value).toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' }))
+	// 筛选创建日期为今天的想念记录 m。
+	const todayMisses = computed(() => misses.value.filter(m => new Date(m.created_at).toDateString() === new Date(now.value).toDateString()))
+	// 今天累计的想念次数。
+	const todayMiss = computed(() => todayMisses.value.length)
+	// 最近一条想念记录。
+	const latestMiss = computed(() => misses.value[0])
+	// 按可见性条件筛选笔记 n 后的展示列表。
+	const filteredNotes = computed(() => notes.value.filter(n => noteFilter.value === 'all' || n.visibility === noteFilter.value))
+	
+	/** 将 title 作为无图标的轻提示展示。 */
+	const toast = (title: string) => { uni.showToast({ title, icon: 'none' }) }
+	
+	/** 展示异常 e 的消息，缺少消息时使用通用提示。 */
+	const error = (e: any) => { toast(e?.message || '操作未完成，请稍后重试') }
+	
+	/** 将日期字符串 value 格式化为中文月日。 */
+	const formatDate = (value: string) => {
+		return new Date(value).toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' })
+	}
+	
+	/** 将日期字符串 value 格式化为中文月日及小时分钟。 */
+	const formatTime = (value: string) => {
+		const targetTime = new Date(value).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+		return formatDate(value) + ' ' + targetTime
+	}
+	
+	/** 展示确认文案 content；以弹窗结果 r 通知 resolve，失败按取消处理。 */
+	const confirm = (content: string): Promise<boolean> => {
+		return new Promise(resolve => uni.showModal({
+			title: '请确认',
+			content,
+			success: r => resolve(r.confirm),
+			fail: () => resolve(false)
+		}))
+	}
+	
+	/** 为本地演示记录生成带时间戳和随机片段的标识。 */
+	const localId = () => ('local-' + Date.now() + '-' + Math.random().toString(36).slice(2))
+	
+	/** 按创建时间及标识比较记录 a、b，保留数据库亚毫秒精度。 */
+	const compareMessages = (a: any, b: any): number => {
+		// 两条记录创建时间的毫秒差。
+		const milliseconds = Date.parse(a.created_at) - Date.parse(b.created_at)
+		/** 从时间字符串 value 提取毫秒之后的小数位用于精细排序。 */
+		const fraction = (value: string) => ((value.match(/\.(\d+)/)?.[1] || '').padEnd(9, '0')).slice(3, 9)
+		return milliseconds || fraction(a.created_at).localeCompare(fraction(b.created_at)) || a.id.localeCompare(b.id)
+	}
+	
+	/** 缓存当前用户最近五百条消息及同步进度。 */
+	const persistChat = () => {
+		if (cloud.session) {
+			// 排序后的消息副本，避免缓存截取影响展示列表。
+			const ordered = [...messages.value].sort(compareMessages)
+			writeChatCache(cloud.url, userId.value, ordered.slice(-500), hasMore.value || ordered.length > 500, synced || undefined)
+		}
+	}
+	
+	/** 删除当前真实账号的本地聊天缓存。 */
+	const removeCurrentChat = () => {
+		if (cloud.session) removeChatCache(cloud.url, userId.value)
+	}
+	
+	/** 恢复当前用户的聊天列表、分页状态与同步游标。 */
+	const restoreChat = () => {
+		// 当前服务地址和用户对应的聊天缓存。
+		const cache = readChatCache(cloud.url, userId.value)
+		messages.value = cache ? [...cache.messages].sort(compareMessages) : []
+		hasMore.value = cache?.hasMore || false
+		synced = cache?.syncedAt || (messages.value.length ? messages.value[0].created_at : null)
+		chatInitialized = !!synced
+	}
+	
+	/** 根据末条记录 row 构造按创建时间、标识向后翻页的筛选条件。 */
+	const afterCursor = (row: any) => {
+		return 'or=' + encodeURIComponent('(created_at.gt.' + row.created_at + ',and(created_at.eq.' + row.created_at + ',id.gt.' + row.id + '))')
+	}	 
+	
+	/** 延迟滚动到聊天底部；revision 保存当前代次，防止重置后误滚动。 */
+	const bottom = () => {
+		const revision = generation
+		scrollTarget.value = ''
+		setTimeout(() => {
+			if (revision === generation) {
+				scrollTarget.value = 'chat-end'
+			}
+		}, 100) 
+	}	
+	
+	/** 切换到 key 对应的页签，并按需清除未读、下载照片和刷新数据。 */
+	const switchTab = (key: string) => {
+		if (tab.value === key) return
+		tab.value = key
+		if (key === 'chat') {
+			unread.value = 0
+			bottom()
+		} else if (key === 'photos') {
+			hydratePhotos()
+		}	
+		if (Date.now() - lastRefresh > 30000) refreshAll()
+	}
+	
+	/** 清理真实会话并恢复或初始化本地演示数据。 */
+	const startDemo = () => {
+		if (signingOut) return
+		clearSession()
+		resetData()
+		entered.value = true
+		// 上次保存在本机的演示数据。
+		const cache = uni.getStorageSync('pair_demo')
+		// 初始化演示消息与笔记使用的统一时间。
+		const now = new Date().toISOString()
+		messages.value = cache?.messages || [{
+			id: 'welcome',
+			sender_id: 'demo-partner',
+			content: '把想说的话都放在这里吧，日常的小事也想听你说。',
+			created_at: now
+		}]
+		misses.value = cache?.misses || []
+		notes.value = cache?.notes || [{
+			id: 'first-note',
+			owner_id: 'demo-me',
+			title: '我们的小小约定',
+			content: '好好吃饭，慢慢生活。\n看到好看的天空，就拍下来给对方。\n有想念的时候，就按一下那颗爱心。',
+			visibility: 'shared',
+			created_at: now,
+			updated_at: now
+		}]
+		photos.value = cache?.photos || []
+		notesMore.value = false;
+		photosMore.value = false;
+		hasMore.value = false
+	}
+	
+	/** 校验登录表单，登录后恢复聊天并启动数据同步。 */
+	const signIn = async() => {
+		if (busy.value || signingOut) return
+		
+		saveConfig(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY)
+		
+		// 邮箱和密码空值校验
+		if (!email.value.trim() || !password.value) {
+			toast('请填写邮箱和密码')
+			return
+		}
+		resetData()
+		busy.value = true
+		// 登录开始时的数据代次，用于丢弃过期结果；异常 e 交由统一提示处理。
+		const revision = generation
+		try {
+			await login(email.value, password.value)
+			if (revision !== generation) return
+			password.value = ''; restoreChat(); await refreshAll()
+			if (revision !== generation) return
+			if (!cloud.session || !members.value.length) throw new Error('初始数据加载失败，请检查网络后重试')
+			entered.value = true; beginSync()
+		} catch (e) { if (revision === generation) {
+			removeCurrentChat()
+			clearSession()
+			resetData()
+			error(e)
+		} }
+		finally { if (revision === generation) busy.value = false }
+		}
+		/** 建立实时订阅，并通过前台轮询补齐数据变更。 */
+		const beginSync = () => {
+		stopRealtime?.()
+		// 订阅所属的数据代次，防止旧订阅更新新会话。
+		const revision = generation
+		// table 为变更表名，row 为记录；列表回调中的 m 用于按标识去重。
+		stopRealtime = watchChanges((table, row) => {
+		if (revision !== generation) return
+		if (table === 'messages') {
+		if (!row?.id || messages.value.some(m => m.id === row.id)) return
+		messages.value.push(row)
+		messages.value.sort(compareMessages); persistChat()
+		if (row.sender_id !== userId.value && tab.value !== 'chat') {
+			unread.value++
+			toast('收到 ' + partnerName.value + ' 的新消息')
+		}
+		if (tab.value === 'chat') bottom()
+		return
+		}
+		if (table === 'miss_you_logs') {
+		if (!row?.id || misses.value.some(m => m.id === row.id)) return
+		misses.value.unshift(row)
+		if (row.sender_id !== userId.value) {
+			toast(partnerName.value + ' 说：想你了 ♥');
+			heartActive.value = true;
+			clearTimeout(heartTimer);
+			heartTimer = setTimeout(() => { heartActive.value = false }, 2500)
+		}
+		return
+		}
+		if (foreground) refreshAll()
+	}, () => { if (revision === generation) refreshAll() })
+	clearInterval(poll)
+	poll = setInterval(() => { if (foreground) refreshAll() }, 30000)
+	}
+	
+	/** 使旧异步任务失效，停止同步并清空页面业务状态。 */
+	const resetData = () => {
+		generation++
+		synced = null
+		chatInitialized = false
+		busy.value = false
+		sending.value = false
+		exporting.value = false
+		loadingHistory.value = false
+		hasMore.value = false
+		notesMore.value = false
+		photosMore.value = false
+		clearTimeout(heartTimer)
+		heartActive.value = false
+		lastRefresh = 0
+		photoLoading.clear()
+		refreshPromise = null
+		refreshAgain = false
+		stopRealtime?.()
+		stopRealtime = null
+		clearInterval(poll)
+		messages.value = []
+		misses.value = []
+		notes.value = []
+		photos.value = []
+		members.value = []
+		photoPaths.clear()
+		photoFailed.value = {}
+		unread.value = 0
+		noteOpen.value = false
+		noteContent.value = ''
+		noteTitle.value = ''
+		messageText.value = ''
+		entered.value = false
+		tab.value = 'home'
+	}	
+	/** 保存连接配置并清理旧会话，提示重新登录。 */
+	const applyConfig = async () => {
+	if (signingOut) return
+	try {
+		removeCurrentChat();
+		resetData();
+		saveConfig(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+		clearSession();
+		toast('连接已保存，请使用预置账号登录')
+	} catch (e) { error(e) }
+	}	
+	/** 合并并发刷新请求，同步成员、消息、今日想念、笔记和照片。 */
+	const refreshAll = async () => {
+	if (!cloud.session) return
+	if (refreshPromise) {
+		refreshAgain = true
+		return refreshPromise
+	}
+	// 本次刷新所属代次，防止重置后的状态被覆盖。
+	const revision = generation
+	// 供并发调用复用，并在结束时释放的刷新任务。
+	const task = (async () => {
+		try {
+		// 无新消息时可采用的本次同步起始时间。
+		const startedAt = new Date().toISOString()
+		// 是否需要先获取最近一页消息，而非执行增量同步。
+		const initial = !chatInitialized
+		/** 首次读取最近消息，后续按时间游标分页补齐增量。 */
+		const readMessages = async () => {
+			if (initial) return request('/rest/v1/messages?select=*&order=created_at.desc,id.desc&limit=50')
+			// 累积各页返回的增量消息。
+			const rows: any[] = []
+			// 向前重叠一秒的同步起点，配合去重避免遗漏边界消息。
+			const since = new Date(Date.parse(synced!) - 1000).toISOString()
+			// 上一页末条记录，用于稳定分页。
+			let cursor: any = null
+			while (revision === generation) {
+			// 当前页的增量消息。
+			const page = await request(
+				'/rest/v1/messages?select=*&order=created_at.asc,id.asc&limit=100&created_at=gte.' +
+				encodeURIComponent(since) +
+				(cursor ? '&' + afterCursor(cursor) : '')
+			)
+			if (revision !== generation) return []
+			rows.push(...page)
+			if (page.length < 100) break
+			cursor = page[page.length - 1]
+			}
+			return rows
+		}	
+		/** 按本地今日的时间范围分页读取全部想念记录。 */
+		const readTodayMisses = async () => {
+			// 今日零点，作为查询的包含边界。
+			const start = new Date(now.value); start.setHours(0, 0, 0, 0)
+			// 明日零点，作为查询的排除边界。
+			const end = new Date(start); end.setDate(end.getDate() + 1)
+			// 累积今天所有分页的想念记录。
+			const rows: any[] = []
+			// 上一页末条想念记录。
+			let cursor: any = null
+			while (revision === generation) {
+			// 当前页的今日想念记录。
+			const page = await request('/rest/v1/miss_you_logs?select=*&order=created_at.asc,id.asc&limit=100&created_at=gte.' + encodeURIComponent(start.toISOString()) + '&created_at=lt.' + encodeURIComponent(end.toISOString()) + (cursor ? '&' + afterCursor(cursor) : ''))
+			if (revision !== generation) return []
+			rows.push(...page)
+			if (page.length < 100) break
+			cursor = page[page.length - 1]
+			}
+			return rows.reverse()
+		}
+		// 并发结果依次为成员、消息、想念、笔记与照片。
+		const result = await Promise.all([
+			request('/rest/v1/app_members?select=*'),
+			readMessages(),
+			readTodayMisses(),
+			request('/rest/v1/notes?select=*&order=updated_at.desc,id.desc&limit=' + Math.max(notes.value.length, 50)),
+			request('/rest/v1/photos?select=*&order=created_at.desc,id.desc&limit=' + Math.max(photos.value.length, 50))
+		])
+		if (revision !== generation) return
+		// 下方回调中 m 表示成员或消息记录，按用户标识校验权限并按记录标识去重。
+		if (!result[0].some((m: any) => m.user_id === userId.value)) {
+			removeCurrentChat()
+			resetData()
+			clearSession()
+			toast('当前账号没有成员权限');
+			return
+		}
+		lastRefresh = Date.now()
+		if (JSON.stringify(members.value) !== JSON.stringify(result[0])) members.value = result[0]
+		// 刷新前已有的消息标识集合。
+		const ids = new Set(messages.value.map(m => m.id))
+		// 本次真正新增的消息数，用于决定是否滚动到底部。
+		const newCount = result[1].filter((m: any) => !ids.has(m.id)).length
+		// 按消息标识合并本地记录与服务端记录。
+		const merged = new Map(messages.value.map(m => [m.id, m]))
+		result[1].forEach((m: any) => merged.set(m.id, m))
+		messages.value = Array.from(merged.values()).sort(compareMessages)
+		if (initial) hasMore.value = result[1].length === 50
+		// 排序后的本次消息结果，用于推进同步时间游标。
+		const fetched = [...result[1]].sort(compareMessages)
+		synced = fetched.length ? fetched[fetched.length - 1].created_at : synced || startedAt
+		chatInitialized = true
+		persistChat()
+		// 按标识合并今日查询与已有想念；m 为想念记录，a、b 为排序记录。
+		const missRows = new Map<string, any>(result[2].map((m: any) => [m.id, m]))
+		misses.value.forEach(m => { if (!missRows.has(m.id)) missRows.set(m.id, m) })
+		misses.value = Array.from(missRows.values()).sort((a: any, b: any) => -compareMessages(a, b))
+		// n、p 分别为已有笔记、照片，i 为对应索引；照片映射时复用本地路径。
+		notesMore.value = result[3].length >= Math.max(notes.value.length, 50)
+		if (notes.value.length !== result[3].length || notes.value.some((n, i) => n.id !== result[3][i].id || n.updated_at !== result[3][i].updated_at)) notes.value = result[3]
+		photosMore.value = result[4].length >= Math.max(photos.value.length, 50)
+		if (photos.value.length !== result[4].length || photos.value.some((p, i) => p.id !== result[4][i].id)) photos.value = result[4].map((p: any) => ({ ...p, local: photoPaths.get(p.id) || '' }))
+		if (tab.value === 'chat' && newCount) bottom()
+		if (tab.value === 'photos') hydratePhotos()
+		} catch (e) { if (revision === generation) error(e) }
+	})().finally(() => {
+		if (refreshPromise === task) {
+		refreshPromise = null
+		if (refreshAgain) {
+			refreshAgain = false
+			refreshAll()
+		}
+		}
+	})
+	refreshPromise = task
+	return task
+	}
+	/** 为相册中尚无本地文件的图片补充下载路径。 */
+	const hydratePhotos = async () => {
+	// 本轮下载所属的数据代次。
+	const revision = generation
+	// photo 为当前待检查的照片，跳过视频、已下载及失败或下载中的项目。
+	for (const photo of photos.value) {
+		if (revision !== generation || tab.value !== 'photos' || !foreground) return
+		if (photo.media_type === 'video' || photo.local || photoFailed.value[photo.id] || photoLoading.has(photo.id)) continue
+		photoLoading.add(photo.id)
+		// path 为下载路径，current 为当前列表中匹配照片 p 的记录，避免写回旧对象。
+		try {
+		const path = await downloadPhoto(photo.storage_path)
+		if (revision !== generation) return
+		photoPaths.set(photo.id, path)
+		const current = photos.value.find(p => p.id === photo.id);
+		if (current) current.local = path
+		}
+		catch (_) { if (revision === generation) photoFailed.value[photo.id] = true }
+		finally { if (revision === generation) photoLoading.delete(photo.id) }
+	}
+	}
+	/** 按最早消息的复合游标加载一页历史消息。 */
+	const loadOlder = async () => {
+	if (loadingHistory.value || !messages.value.length) return
+	loadingHistory.value = true
+	// 历史请求所属的数据代次。
+	const revision = generation
+	try {
+		// 当前列表最早的消息，作为向前翻页边界。
+		const first = messages.value[0]
+		// 查询早于边界时间与标识的复合筛选条件。
+		const cursor = 'or=' + encodeURIComponent('(created_at.lt.' + first.created_at + ',and(created_at.eq.' + first.created_at + ',id.lt.' + first.id + '))')
+		// 服务端按时间倒序返回的历史消息页。
+		const rows = await request('/rest/v1/messages?select=*&order=created_at.desc,id.desc&limit=50&' + cursor)
+		if (revision !== generation) return
+		// 已有消息 m 的标识集合，用于过滤分页重叠记录。
+		const seen = new Set(messages.value.map(m => m.id))
+		messages.value = [...rows.filter((m: any) => !seen.has(m.id)).reverse(), ...messages.value]
+		hasMore.value = rows.length === 50
+		messages.value.sort(compareMessages); persistChat()
+	}
+	catch (e) { if (revision === generation) error(e) }
+	finally { if (revision === generation) loadingHistory.value = false }
+	}
+	/** 发送输入框消息并更新列表、缓存与滚动位置。 */
+	const sendMessage = async () => {
+	// 去除首尾空白后的待发送正文。
+	const content = messageText.value.trim()
+	if (!content || sending.value) return
+	sending.value = true
+	// 发送操作所属的数据代次。
+	const revision = generation
+	try {
+		// 本地构造或云端返回的消息；后续以消息 m 的标识检查重复。
+		const row = (await request('/rest/v1/messages', 'POST', { content }))[0]
+		if (revision !== generation) return
+		if (!messages.value.some(m => m.id === row.id)) messages.value.push(row)
+		messages.value.sort(compareMessages); persistChat()
+		messageText.value = ''; bottom()
+	} catch (e) { if (revision === generation) error(e) } finally { if (revision === generation) sending.value = false }
+	}
+	/** 发送一条想念记录，并在短暂冷却后恢复爱心状态。 */
+	const sendMiss = async () => {
+	if (heartActive.value) return
+	heartActive.value = true
+	// 想念发送操作所属的数据代次。
+	const revision = generation
+	try {
+		// 本地构造或云端返回的想念记录；以已有记录 m 的标识去重。
+		const row = (await request('/rest/v1/miss_you_logs', 'POST', {}))[0]
+		if (revision !== generation) return
+		if (!misses.value.some(m => m.id === row.id)) misses.value.unshift(row)
+		toast('想念已送出 ♥')
+	}
+	catch (e) { if (revision === generation) error(e) }
+	finally { if (revision === generation) heartTimer = setTimeout(() => { heartActive.value = false }, 1800) }
+	}	
+	/** 追加下一页笔记，并更新是否还能继续加载。 */
+	const loadMoreNotes = async () => {
+	// 笔记分页请求所属的数据代次。
+	const revision = generation
+	// rows 为返回页；n 为新笔记，m 为已有笔记，按标识排除重复。
+	try {
+		const rows = await request('/rest/v1/notes?select=*&order=updated_at.desc,id.desc&offset=' + notes.value.length + '&limit=50')
+		if (revision !== generation) return
+		notes.value.push(...rows.filter((n: any) => !notes.value.some(m => m.id === n.id)))
+		notesMore.value = rows.length === 50
+	} catch (e) { error(e) }
+	}	
+	/** 追加下一页照片元数据，并补充图片本地路径。 */
+	const loadMorePhotos = async () => {
+	// 照片分页请求所属的数据代次。
+	const revision = generation
+	// rows 为返回页；p 为新照片，m 为已有照片，按标识排除重复。
+	try {
+		const rows = await request('/rest/v1/photos?select=*&order=created_at.desc,id.desc&offset=' + photos.value.length + '&limit=50')
+		if (revision !== generation) return
+		photos.value.push(...rows.filter((p: any) => !photos.value.some(m => m.id === p.id)))
+		photosMore.value = rows.length === 50
+		hydratePhotos()
+	} catch (e) { error(e) }
+	}	
+	/** 用 note 初始化笔记面板；空值表示新建，他人笔记只读。 */
+	const editNote = (note: any) => {
+	editingId.value = note?.id || ''
+	noteTitle.value = note?.title || ''
+	noteContent.value = note?.content || ''
+	noteShared.value = note?.visibility === 'shared'
+	noteReadOnly.value = !!note && note.owner_id !== userId.value
+	originalNote = JSON.stringify([noteTitle.value, noteContent.value, noteShared.value])
+	noteOpen.value = true
+	}	
+	/** 关闭笔记面板，存在未保存修改时先请求确认。 */
+	const closeNote = async () => {
+	if (!noteReadOnly.value
+		&& originalNote !== JSON.stringify([noteTitle.value, noteContent.value, noteShared.value])
+		&& !await confirm('离开后将丢失未保存的修改，确定离开吗？')
+	) return
+	noteOpen.value = false
+	}
+	
+	/** 保存新建或编辑的笔记，并将最新记录置于列表首位。 */
+	const saveNote = async () => {
+	if (busy.value || noteReadOnly.value) return
+	if (!noteTitle.value.trim() && !noteContent.value.trim()) {
+		toast('写点什么再保存吧')
+		return
+	}
+	busy.value = true
+	// 笔记保存操作所属的数据代次。
+	const revision = generation
+	try {
+		// 提交到本地或云端的笔记标题、正文与可见性。
+		const data = {
+		title: noteTitle.value.trim(),
+		content: noteContent.value,
+		visibility: noteShared.value ? 'shared' : 'private'
+		}
+		// 云端保存结果，空列表表示无权限或目标已被删除。
+		const rows = await request('/rest/v1/notes' + (editingId.value ? '?id=eq.' + editingId.value : ''), editingId.value ? 'PATCH' : 'POST', data)
+		if (revision !== generation) return
+		if (!rows.length) throw new Error('没有编辑权限，或笔记已被删除')
+		notes.value = [rows[0], ...notes.value.filter(n => n.id !== rows[0].id)]
+		noteOpen.value = false; toast('小心事已保存')
+	}
+	catch (e) { if (revision === generation) error(e) }
+	finally { if (revision === generation) busy.value = false }
+	}	
+	/** 确认后删除当前笔记，并关闭笔记面板。 */
+	const deleteNote = async () => {
+	if (!await confirm('确定删除这篇笔记吗？删除后无法恢复。')) return
+	// rows 用于确认云端实际删除记录；n 为按标识移除的列表笔记。
+	try {
+		const rows = await request('/rest/v1/notes?id=eq.' + editingId.value, 'DELETE')
+		if (!rows.length) throw new Error('笔记已删除或无权限')
 
-	  //
-    if (busy.value || signingOut) return
+		notes.value = notes.value.filter(n => n.id !== editingId.value)
+		noteOpen.value = false
+		toast('笔记已删除')
+	} catch (e) { error(e) }
+	}	
+	/** 选择一张压缩图片，在演示模式保存到本机，否则上传云端。 */
+	const addPhoto = async () => {
+	if (busy.value) return
+	// r 为选图结果；文件保存回调中的 resolve、reject 分别接收成功与失败结果。
+	uni.chooseImage({
+		count: 1,
+		sizeType: ['compressed'],
+		success: async r => {
+		busy.value = true
+		uni.showLoading({ title: '收藏这一刻…', mask: true })
+		try {
+			// 用户选中图片的临时文件路径。
+			const path = r.tempFilePaths[0]
+			await uploadPhoto(path)
+			await refreshAll()
+			
+			toast('照片已收藏')
+		}
+		catch (e) { error(e) }
+		finally {
+			busy.value = false
+			uni.hideLoading()
+		}
+		},
+		fail: () => {}
+	})
+	}	
+	/** 预览 photo，缺少本地路径时先下载并更新缓存。 */
+	const previewPhoto = async (photo: any) => { try { if (!photo.local) { photo.local = await downloadPhoto(photo.storage_path); photoPaths.set(photo.id, photo.local); photoFailed.value[photo.id] = false }; uni.previewImage({ urls: [photo.local] }) } catch (e) { error(e) } }
+	
+	/** 将 photo 对应的图片保存到手机相册。 */
+	const savePhoto = async (photo: any) => {
+	// path 为已有或新下载的本地图片路径。
+	try {
+		const path = photo.local || await downloadPhoto(photo.storage_path)
+		uni.saveImageToPhotosAlbum({
+		filePath: path,
+		success: () => toast('已保存到手机相册'),
+		fail: () => toast('保存失败，请检查相册权限')
+		})
+	} catch (e) { error(e) }
+	}	
+	/** 确认后删除 photo 的文件与元数据，并清理列表及路径缓存。 */
+	const deletePhoto = async (photo: any) => {
+	if (!await confirm('删除此云端照片后，两个人都无法再从这里下载。请先保存到手机。确定清理？')) return
+	try {
+		// rows 为元数据删除结果，确认文件清理后记录也已删除。
+		await request('/storage/v1/object/photos', 'DELETE', { prefixes: [photo.storage_path] })
+		const rows = await request('/rest/v1/photos?id=eq.' + photo.id, 'DELETE')
+		if (!rows.length) throw new Error('文件已清理，元数据删除失败，请刷新后重试')
 
-    resetData()
-    demo.value = false
-    busy.value = true
-    const revision = generation
-    try {
-      await login(email.value, password.value)
-      if (revision !== generation) return
-      password.value = ''; demo.value = false; restoreChat(); await refreshAll()
-      if (revision !== generation) return
-      if (!cloud.session || !members.value.length) throw new Error('初始数据加载失败，请检查网络后重试')
-      entered.value = true; beginSync()
-    } catch (e) { if (revision === generation) { removeCurrentChat(); clearSession(); resetData(); error(e) } }
-    finally { if (revision === generation) busy.value = false }
-  }
-  function beginSync() {
-    stopRealtime?.()
-    const revision = generation
-    stopRealtime = watchChanges((table, row) => {
-      if (revision !== generation) return
-      if (table === 'messages') {
-        if (!row?.id || messages.value.some(m => m.id === row.id)) return
-        messages.value.push(row)
-        messages.value.sort(compareMessages); persistChat()
-        if (row.sender_id !== userId.value && tab.value !== 'chat') { unread.value++; toast('收到 ' + partnerName.value + ' 的新消息') }
-        if (tab.value === 'chat') bottom()
-        return
-      }
-      if (table === 'miss_you_logs') {
-        if (!row?.id || misses.value.some(m => m.id === row.id)) return
-        misses.value.unshift(row)
-        if (row.sender_id !== userId.value) { toast(partnerName.value + ' 说：想你了 ♥'); heartActive.value = true; clearTimeout(heartTimer); heartTimer = setTimeout(() => { heartActive.value = false }, 2500) }
-        return
-      }
-      if (foreground) refreshAll()
-    }, () => { if (revision === generation) refreshAll() })
-    clearInterval(poll)
-    poll = setInterval(() => { if (foreground) refreshAll() }, 30000)
-  }
-  
-  const resetData = () => {
-    generation++
-    synced = null
-    chatInitialized = false
-    busy.value = false
-    sending.value = false
-    exporting.value = false
-    loadingHistory.value = false
-    hasMore.value = false
-    notesMore.value = false
-    photosMore.value = false
-    clearTimeout(heartTimer)
-    heartActive.value = false
-    lastRefresh = 0
-    photoLoading.clear()
-    refreshPromise = null
-    refreshAgain = false
-    stopRealtime?.()
-    stopRealtime = null
-    clearInterval(poll)
-    messages.value = []
-    misses.value = []
-    notes.value = []
-    photos.value = []
-    members.value = []
-    photoPaths.clear()
-    photoFailed.value = {}
-    unread.value = 0
-    noteOpen.value = false
-    noteContent.value = ''
-    noteTitle.value = ''
-    messageText.value = ''
-    entered.value = false
-    tab.value = 'home'
-  }
-  async function applyConfig() {
-    if (signingOut) return
-    try { removeCurrentChat(); resetData(); saveConfig(configUrl.value, configKey.value); clearSession(); demo.value = false; configOpen.value = false; toast('连接已保存，请使用预置账号登录') } catch (e) { error(e) }
-  }
-  async function refreshAll() {
-    if (demo.value || !cloud.session) return
-    if (refreshPromise) { refreshAgain = true; return refreshPromise }
-    const revision = generation
-    const task = (async () => {
-      try {
-        const startedAt = new Date().toISOString()
-        const initial = !chatInitialized
-        const readMessages = async () => {
-          if (initial) return request('/rest/v1/messages?select=*&order=created_at.desc,id.desc&limit=50')
-          const rows: any[] = []
-          const since = new Date(Date.parse(synced!) - 1000).toISOString()
-          let cursor: any = null
-          while (revision === generation) {
-            const page = await request('/rest/v1/messages?select=*&order=created_at.asc,id.asc&limit=100&created_at=gte.' + encodeURIComponent(since) + (cursor ? '&' + afterCursor(cursor) : ''))
-            if (revision !== generation) return []
-            rows.push(...page)
-            if (page.length < 100) break
-            cursor = page[page.length - 1]
-          }
-          return rows
-        }
-        const readTodayMisses = async () => {
-          const start = new Date(now.value); start.setHours(0, 0, 0, 0)
-          const end = new Date(start); end.setDate(end.getDate() + 1)
-          const rows: any[] = []
-          let cursor: any = null
-          while (revision === generation) {
-            const page = await request('/rest/v1/miss_you_logs?select=*&order=created_at.asc,id.asc&limit=100&created_at=gte.' + encodeURIComponent(start.toISOString()) + '&created_at=lt.' + encodeURIComponent(end.toISOString()) + (cursor ? '&' + afterCursor(cursor) : ''))
-            if (revision !== generation) return []
-            rows.push(...page)
-            if (page.length < 100) break
-            cursor = page[page.length - 1]
-          }
-          return rows.reverse()
-        }
-        const result = await Promise.all([
-          request('/rest/v1/app_members?select=*'),
-          readMessages(),
-          readTodayMisses(),
-          request('/rest/v1/notes?select=*&order=updated_at.desc,id.desc&limit=' + Math.max(notes.value.length, 50)),
-          request('/rest/v1/photos?select=*&order=created_at.desc,id.desc&limit=' + Math.max(photos.value.length, 50))
-        ])
-        if (revision !== generation) return
-        if (!result[0].some((m: any) => m.user_id === userId.value)) { removeCurrentChat(); resetData(); clearSession(); toast('当前账号没有成员权限'); return }
-        lastRefresh = Date.now()
-        if (JSON.stringify(members.value) !== JSON.stringify(result[0])) members.value = result[0]
-        const ids = new Set(messages.value.map(m => m.id))
-        const newCount = result[1].filter((m: any) => !ids.has(m.id)).length
-        const merged = new Map(messages.value.map(m => [m.id, m]))
-        result[1].forEach((m: any) => merged.set(m.id, m))
-        messages.value = Array.from(merged.values()).sort(compareMessages)
-        if (initial) hasMore.value = result[1].length === 50
-        const fetched = [...result[1]].sort(compareMessages)
-        synced = fetched.length ? fetched[fetched.length - 1].created_at : synced || startedAt
-        chatInitialized = true
-        persistChat()
-        const missRows = new Map<string, any>(result[2].map((m: any) => [m.id, m]))
-        misses.value.forEach(m => { if (!missRows.has(m.id)) missRows.set(m.id, m) })
-        misses.value = Array.from(missRows.values()).sort((a: any, b: any) => -compareMessages(a, b))
-        notesMore.value = result[3].length >= Math.max(notes.value.length, 50)
-        if (notes.value.length !== result[3].length || notes.value.some((n, i) => n.id !== result[3][i].id || n.updated_at !== result[3][i].updated_at)) notes.value = result[3]
-        photosMore.value = result[4].length >= Math.max(photos.value.length, 50)
-        if (photos.value.length !== result[4].length || photos.value.some((p, i) => p.id !== result[4][i].id)) photos.value = result[4].map((p: any) => ({ ...p, local: photoPaths.get(p.id) || '' }))
-        if (tab.value === 'chat' && newCount) bottom()
-        if (tab.value === 'photos') hydratePhotos()
-      } catch (e) { if (revision === generation) error(e) }
-    })().finally(() => {
-      if (refreshPromise === task) {
-        refreshPromise = null
-        if (refreshAgain) { refreshAgain = false; refreshAll() }
-      }
-    })
-    refreshPromise = task
-    return task
-  }
-  async function hydratePhotos() {
-    const revision = generation
-    for (const photo of photos.value) {
-      if (revision !== generation || tab.value !== 'photos' || !foreground) return
-      if (photo.media_type === 'video' || photo.local || photoFailed.value[photo.id] || photoLoading.has(photo.id)) continue
-      photoLoading.add(photo.id)
-      try { const path = await downloadPhoto(photo.storage_path); if (revision !== generation) return; photoPaths.set(photo.id, path); const current = photos.value.find(p => p.id === photo.id); if (current) current.local = path }
-      catch (_) { if (revision === generation) photoFailed.value[photo.id] = true }
-      finally { if (revision === generation) photoLoading.delete(photo.id) }
-    }
-  }
-  async function loadOlder() {
-    if (loadingHistory.value || demo.value || !messages.value.length) return
-    loadingHistory.value = true
-    const revision = generation
-    try {
-      const first = messages.value[0]
-      const cursor = 'or=' + encodeURIComponent('(created_at.lt.' + first.created_at + ',and(created_at.eq.' + first.created_at + ',id.lt.' + first.id + '))')
-      const rows = await request('/rest/v1/messages?select=*&order=created_at.desc,id.desc&limit=50&' + cursor)
-      if (revision !== generation) return
-      const seen = new Set(messages.value.map(m => m.id))
-      messages.value = [...rows.filter((m: any) => !seen.has(m.id)).reverse(), ...messages.value]
-      hasMore.value = rows.length === 50
-      messages.value.sort(compareMessages); persistChat()
-    } catch (e) { if (revision === generation) error(e) } finally { if (revision === generation) loadingHistory.value = false }
-  }
-  async function sendMessage() {
-    const content = messageText.value.trim()
-    if (!content || sending.value) return
-    sending.value = true
-    const revision = generation
-    try {
-      const row = demo.value ? { id: localId(), sender_id: userId.value, content, created_at: new Date().toISOString() } : (await request('/rest/v1/messages', 'POST', { content }))[0]
-      if (revision !== generation) return
-      if (!messages.value.some(m => m.id === row.id)) messages.value.push(row)
-      messages.value.sort(compareMessages); persistChat()
-      messageText.value = ''; persistDemo(); bottom()
-    } catch (e) { if (revision === generation) error(e) } finally { if (revision === generation) sending.value = false }
-  }
-  async function sendMiss() {
-    if (heartActive.value) return
-    heartActive.value = true
-    const revision = generation
-    try {
-      const row = demo.value ? { id: localId(), sender_id: userId.value, created_at: new Date().toISOString() } : (await request('/rest/v1/miss_you_logs', 'POST', {}))[0]
-      if (revision !== generation) return
-      if (!misses.value.some(m => m.id === row.id)) misses.value.unshift(row)
-      persistDemo(); toast(demo.value ? '已记录一份想念（本地演示）' : '想念已送出 ♥')
-    } catch (e) { if (revision === generation) error(e) } finally { if (revision === generation) heartTimer = setTimeout(() => { heartActive.value = false }, 1800) }
-  }
-  async function loadMoreNotes() {
-    const revision = generation
-    try { const rows = await request('/rest/v1/notes?select=*&order=updated_at.desc,id.desc&offset=' + notes.value.length + '&limit=50'); if (revision !== generation) return; notes.value.push(...rows.filter((n: any) => !notes.value.some(m => m.id === n.id))); notesMore.value = rows.length === 50 } catch (e) { error(e) }
-  }
-  async function loadMorePhotos() {
-    const revision = generation
-    try { const rows = await request('/rest/v1/photos?select=*&order=created_at.desc,id.desc&offset=' + photos.value.length + '&limit=50'); if (revision !== generation) return; photos.value.push(...rows.filter((p: any) => !photos.value.some(m => m.id === p.id))); photosMore.value = rows.length === 50; hydratePhotos() } catch (e) { error(e) }
-  }
-  function editNote(note: any) {
-    editingId.value = note?.id || ''; noteTitle.value = note?.title || ''; noteContent.value = note?.content || ''; noteShared.value = note?.visibility === 'shared'; noteReadOnly.value = !!note && note.owner_id !== userId.value
-    originalNote = JSON.stringify([noteTitle.value, noteContent.value, noteShared.value]); noteOpen.value = true
-  }
-  async function closeNote() { if (!noteReadOnly.value && originalNote !== JSON.stringify([noteTitle.value, noteContent.value, noteShared.value]) && !await confirm('离开后将丢失未保存的修改，确定离开吗？')) return; noteOpen.value = false }
-  async function saveNote() {
-    if (busy.value || noteReadOnly.value) return
-    if (!noteTitle.value.trim() && !noteContent.value.trim()) { toast('写点什么再保存吧'); return }
-    busy.value = true
-    const revision = generation
-    try {
-      const data = { title: noteTitle.value.trim(), content: noteContent.value, visibility: noteShared.value ? 'shared' : 'private' }
-      if (demo.value) {
-        const old = notes.value.find(n => n.id === editingId.value)
-        const now = new Date().toISOString()
-        const row = { ...data, id: editingId.value || localId(), owner_id: userId.value, created_at: old?.created_at || now, updated_at: now }
-        notes.value = [row, ...notes.value.filter(n => n.id !== row.id)]; persistDemo()
-      } else {
-        const rows = await request('/rest/v1/notes' + (editingId.value ? '?id=eq.' + editingId.value : ''), editingId.value ? 'PATCH' : 'POST', data)
-        if (revision !== generation) return
-        if (!rows.length) throw new Error('没有编辑权限，或笔记已被删除')
-        notes.value = [rows[0], ...notes.value.filter(n => n.id !== rows[0].id)]
-      }
-      noteOpen.value = false; toast('小心事已保存')
-    } catch (e) { if (revision === generation) error(e) } finally { if (revision === generation) busy.value = false }
-  }
-  async function deleteNote() {
-    if (!await confirm('确定删除这篇笔记吗？删除后无法恢复。')) return
-    try { if (!demo.value) { const rows = await request('/rest/v1/notes?id=eq.' + editingId.value, 'DELETE'); if (!rows.length) throw new Error('笔记已删除或无权限') }; notes.value = notes.value.filter(n => n.id !== editingId.value); persistDemo(); noteOpen.value = false; toast('笔记已删除') } catch (e) { error(e) }
-  }
-  async function addPhoto() {
-    if (busy.value) return
-    uni.chooseImage({ count: 1, sizeType: ['compressed'], success: async r => {
-      busy.value = true; uni.showLoading({ title: '收藏这一刻…', mask: true })
-      try {
-        const path = r.tempFilePaths[0]
-        if (demo.value) {
-          let saved: any = { savedFilePath: path }
-          // #ifndef WEB
-          saved = await new Promise((resolve, reject) => uni.getFileSystemManager().saveFile({ tempFilePath: path, success: resolve, fail: reject }))
-          // #endif
-          photos.value.unshift({ id: localId(), uploader_id: userId.value, local: saved.savedFilePath, file_name: '我们的照片.jpg', created_at: new Date().toISOString() }); persistDemo()
-        } else { await uploadPhoto(path); await refreshAll() }
-        toast('照片已收藏')
-      } catch (e) { error(e) } finally { busy.value = false; uni.hideLoading() }
-    }, fail: () => {} })
-  }
-  async function previewPhoto(photo: any) { try { if (!photo.local) { photo.local = await downloadPhoto(photo.storage_path); photoPaths.set(photo.id, photo.local); photoFailed.value[photo.id] = false }; uni.previewImage({ urls: [photo.local] }) } catch (e) { error(e) } }
-  async function savePhoto(photo: any) {
-    try { const path = photo.local || await downloadPhoto(photo.storage_path); uni.saveImageToPhotosAlbum({ filePath: path, success: () => toast('已保存到手机相册'), fail: () => toast('保存失败，请检查相册权限') }) } catch (e) { error(e) }
-  }
-  async function deletePhoto(photo: any) {
-    if (!await confirm('删除此云端照片后，两个人都无法再从这里下载。请先保存到手机。确定清理？')) return
-    try {
-      if (!demo.value) { await request('/storage/v1/object/photos', 'DELETE', { prefixes: [photo.storage_path] }); const rows = await request('/rest/v1/photos?id=eq.' + photo.id, 'DELETE'); if (!rows.length) throw new Error('文件已清理，元数据删除失败，请刷新后重试') }
-      // #ifndef WEB
-      else if (photo.local) uni.getFileSystemManager().removeSavedFile({ filePath: photo.local })
-      // #endif
-      photos.value = photos.value.filter(p => p.id !== photo.id); photoPaths.delete(photo.id); persistDemo(); toast('照片已清理')
-    } catch (e) { error(e) }
-  }
-  async function exportNotes() {
-    if (exporting.value) return
-    exporting.value = true
-    const revision = generation
-    let text = ''
-    try {
-      let rows = [...notes.value]
-      if (!demo.value) {
-        rows = []; let cursor: any = null
-        while (true) {
-          const page = await request('/rest/v1/notes?select=*&order=created_at.asc,id.asc&limit=100' + (cursor ? '&' + afterCursor(cursor) : ''))
-          if (revision !== generation) return
-          rows.push(...page); if (page.length < 100) break; cursor = page[page.length - 1]
-        }
-      }
-      if (revision !== generation) return
-      if (!rows.length) { toast('还没有可以导出的笔记'); return }
-      text = '# 我们俩 · 笔记导出\n\n导出时间：' + new Date().toISOString() + '\n\n' + rows.map(n => '## ' + (n.title || '无题') + '\n\n可见性：' + n.visibility + '\n作者：' + n.owner_id + '\n创建时间：' + n.created_at + '\n更新时间：' + n.updated_at + '\n\n' + n.content + '\n\n---\n').join('\n')
-      const destination = await exportNoteFile(text)
-      if (revision !== generation) return
-      uni.showModal({ title: '笔记已导出', content: destination, showCancel: false })
-    } catch (e: any) {
-      if (revision !== generation) return
-      if (!text) { error(e); return }
-      const copy = await new Promise<boolean>(resolve => uni.showModal({ title: '导出失败', content: (e?.message || '无法生成文件') + '\n是否复制笔记内容作为备份？', confirmText: '复制内容', success: r => resolve(r.confirm), fail: () => resolve(false) }))
-      if (!copy || revision !== generation) return
-      await new Promise<void>(resolve => uni.setClipboardData({ data: text, showToast: false, success: () => { if (revision === generation) toast('笔记内容已复制'); resolve() }, fail: () => { if (revision === generation) toast('复制失败，请稍后重新导出'); resolve() } }))
-    } finally { if (revision === generation) exporting.value = false }
-  }
-  async function clearCache() {
-    const revision = generation
-    if (!await confirm('将清理图片临时文件和内存列表；云端数据及登录状态保留。')) return
-    if (revision !== generation) return
-    removeCurrentChat()
-    // #ifndef WEB
-    const fs = uni.getFileSystemManager()
-    for (const path of photoPaths.values()) fs.unlink({ filePath: path })
-    // #endif
-    if (!demo.value) {
-      const wasEntered = entered.value
-      const currentTab = tab.value
-      resetData(); entered.value = wasEntered; tab.value = currentTab
-      const reloadRevision = generation
-      await refreshAll()
-      if (reloadRevision !== generation) return
-      if (cloud.session && entered.value) beginSync()
-    } else { photoPaths.clear(); photoFailed.value = {} }
-    toast('本地缓存已刷新')
-  }
-  async function finishSignOut() {
-    if (signingOut) return
-    signingOut = true
-    const wasDemo = demo.value
-    removeCurrentChat()
-    resetData()
-    const revision = generation
-    try { if (!wasDemo) await logout() }
-    catch (_) { /* Local session cleanup is completed below. */ }
-    finally { signingOut = false; if (revision === generation) { clearSession(); resetData(); demo.value = false } }
-  }
-  async function signOut() {
-    const revision = generation
-    if (!await confirm(demo.value ? '确定退出本地演示？演示数据保留在此设备。' : '确定退出当前账号？')) return
-    if (revision !== generation) return
-    await finishSignOut()
-  }
-  function updateNow() {
-    const previousDay = new Date(now.value).toDateString()
-    now.value = Date.now()
-    if (previousDay !== new Date(now.value).toDateString() && entered.value && !demo.value) refreshAll()
-  }
-  const clock = setInterval(updateNow, 1000)
-  function handleShow() { foreground = true; updateNow(); if (entered.value && !demo.value) { if (Date.now() - lastRefresh > 10000) refreshAll(); if (tab.value === 'photos') hydratePhotos() } }
-  function handleHide() { foreground = false }
-  onUnmounted(() => { resetData(); clearInterval(clock) })
-  if (configured() && cloud.session) { restoreChat(); entered.value = true; refreshAll(); beginSync() }
-  return {
-    tabs, tab, entered, demo, busy, sending, exporting, email, password, messages, misses, notes, photos, members, unread, messageText, scrollTarget, heartActive, hasMore, loadingHistory, notesMore, photosMore, photoFailed, configOpen, configUrl, configKey, noteOpen, noteTitle, noteContent, noteShared, editingId, noteReadOnly, noteFilter,
-    cloud, configured, userId, myName, partnerName, today, todayMiss, todayMisses, latestMiss, filteredNotes,
-    toast, formatDate, formatTime, switchTab, startDemo, signIn, applyConfig, refreshAll, loadOlder, sendMessage, sendMiss, loadMoreNotes, loadMorePhotos, editNote, closeNote, saveNote, deleteNote, addPhoto, previewPhoto, savePhoto, deletePhoto, exportNotes, clearCache, signOut, finishSignOut, handleShow, handleHide
-  }
+		// #ifndef WEB
+		else if (photo.local) uni.getFileSystemManager().removeSavedFile({ filePath: photo.local })
+		// #endif
+		// p 为列表中的照片，按标识排除已删除项。
+		photos.value = photos.value.filter(p => p.id !== photo.id)
+		photoPaths.delete(photo.id)
+		toast('照片已清理')
+	} catch (e) { error(e) }
+	}	
+	/** 导出全部可访问笔记为文件，失败时提供复制正文的备份方式。 */
+	const exportNotes = async () => {
+	if (exporting.value) return
+	exporting.value = true
+	// 导出任务所属的数据代次。
+	const revision = generation
+	// 已生成的导出正文，文件导出失败时用于复制备份。
+	let text = ''
+	try {
+		// 待导出的笔记集合，真实模式下改为分页获取全部记录。
+		let rows = [...notes.value]
+
+		// 清空已加载列表；cursor 保存上一页末条笔记以继续分页。
+		rows = []
+		let cursor: any = null
+		while (true) {
+			// 当前导出分页返回的笔记。
+			const page = await request('/rest/v1/notes?select=*&order=created_at.asc,id.asc&limit=100' + (cursor ? '&' + afterCursor(cursor) : ''))
+			if (revision !== generation) return
+			rows.push(...page)
+			if (page.length < 100) break
+			cursor = page[page.length - 1]
+		}
+
+		if (revision !== generation) return
+		if (!rows.length) {
+		toast('还没有可以导出的笔记')
+		return
+		}
+		// n 为待导出笔记，将标题、元数据和正文拼接为文档内容。
+		text = '# 我们俩 · 笔记导出\n\n导出时间：' + new Date().toISOString() + '\n\n' + rows.map(n => '## ' + (n.title || '无题') + '\n\n可见性：' + n.visibility + '\n作者：' + n.owner_id + '\n创建时间：' + n.created_at + '\n更新时间：' + n.updated_at + '\n\n' + n.content + '\n\n---\n').join('\n')
+		// 导出工具返回的文件位置或保存结果说明。
+		const destination = await exportNoteFile(text)
+		if (revision !== generation) return
+		uni.showModal({ title: '笔记已导出', content: destination, showCancel: false })
+	} catch (e: any) {
+		if (revision !== generation) return
+		if (!text) { error(e); return }
+		// 是否同意复制备份；e 为导出异常，r 为弹窗结果，resolve 返回确认状态。
+		const copy = await new Promise<boolean>(resolve => uni.showModal({ title: '导出失败', content: (e?.message || '无法生成文件') + '\n是否复制笔记内容作为备份？', confirmText: '复制内容', success: r => resolve(r.confirm), fail: () => resolve(false) }))
+		if (!copy || revision !== generation) return
+		await new Promise<void>(resolve => uni.setClipboardData({ data: text, showToast: false, success: () => { if (revision === generation) toast('笔记内容已复制'); resolve() }, fail: () => { if (revision === generation) toast('复制失败，请稍后重新导出'); resolve() } }))
+	} finally { if (revision === generation) exporting.value = false }
+	}	
+	/** 清理聊天与图片缓存，并保留当前登录入口和页签重新加载数据。 */
+	const clearCache = async () => {
+	// 确认弹窗打开前的数据代次。
+	const revision = generation
+	if (!await confirm('将清理图片临时文件和内存列表；云端数据及登录状态保留。')) return
+	if (revision !== generation) return
+	removeCurrentChat()
+	// #ifndef WEB
+	// 用于删除已下载临时图片的文件系统管理器。
+	const fs = uni.getFileSystemManager()
+	// path 为缓存映射中的本地图片路径。
+	for (const path of photoPaths.values()) fs.unlink({ filePath: path })
+	// #endif
+		// 数据重置前是否已经进入主界面。
+		const wasEntered = entered.value
+		// 数据重置前选中的页签。
+		const currentTab = tab.value
+		resetData()
+		entered.value = wasEntered
+		tab.value = currentTab
+		// 重置后的数据代次，用于检查重新加载期间是否再次重置。
+		const reloadRevision = generation
+		await refreshAll()
+		if (reloadRevision !== generation) return
+		if (cloud.session && entered.value) beginSync()
+	toast('本地缓存已刷新')
+	}	
+	/** 执行退出并确保清理本地会话，即使云端退出失败也完成收尾。 */
+	const finishSignOut = async () => {
+	if (signingOut) return
+	signingOut = true
+	// 退出前的模式，决定是否需要调用云端退出。
+	removeCurrentChat()
+	resetData()
+	// 清理后所属的数据代次，限制退出收尾操作的作用范围。
+	const revision = generation
+	try { await logout() }
+	catch (_) { /* Local session cleanup is completed below. */ }
+	finally { signingOut = false; if (revision === generation) { clearSession(); resetData();} }
+	}	
+	/** 根据当前模式展示退出确认，通过后执行退出流程。 */
+	const signOut = async () => {
+	// 确认弹窗打开前的数据代次。
+	const revision = generation
+	if (!await confirm('确定退出当前账号？')) return
+	if (revision !== generation) return
+	await finishSignOut()
+	}	
+	/** 更新当前时间，跨日时刷新真实账号的数据。 */
+	const updateNow = () => {
+	// 更新时间前的本地日期，用于判断是否跨日。
+	const previousDay = new Date(now.value).toDateString()
+	now.value = Date.now()
+	if (previousDay !== new Date(now.value).toDateString() && entered.value) refreshAll()
+	}	
+	// 每秒更新展示时间与跨日检测的定时器。
+	const clock = setInterval(updateNow, 1000)	
+	/** 页面回到前台时更新时间，并按需刷新数据和补充照片下载。 */
+	const handleShow = () => {
+	foreground = true
+	updateNow()
+	if (entered.value) {
+		if (Date.now() - lastRefresh > 10000) refreshAll()
+		if (tab.value === 'photos') hydratePhotos()
+	}
+	}
+	
+	/** 标记页面进入后台，暂停受前台状态约束的同步工作。 */
+	const handleHide = () => { foreground = false }	
+	onUnmounted(() => {
+	resetData()
+	clearInterval(clock)
+	})	
+	if (configured() && cloud.session) {
+	restoreChat()
+	entered.value = true
+	refreshAll()
+	beginSync()
+	}
+	
+	return {
+	tabs, tab, entered, busy, sending, exporting, email, password, messages, misses, notes, photos,
+	members, unread, messageText, scrollTarget, heartActive, hasMore, loadingHistory, notesMore, photosMore,
+	photoFailed, noteOpen, noteTitle, noteContent, noteShared, editingId,
+	noteReadOnly, noteFilter, cloud, userId, myName, partnerName, today, todayMiss, todayMisses, latestMiss,
+	filteredNotes, toast, configured, formatDate, formatTime, switchTab, startDemo, signIn, applyConfig,
+	refreshAll, loadOlder, sendMessage, sendMiss, loadMoreNotes, loadMorePhotos, editNote, closeNote,
+	saveNote, deleteNote, addPhoto, previewPhoto, savePhoto, deletePhoto, exportNotes, clearCache, signOut,
+	finishSignOut, handleShow, handleHide
+	}
 }

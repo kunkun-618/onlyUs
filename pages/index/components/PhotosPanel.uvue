@@ -32,7 +32,7 @@
           <view class="photo-actions">
             <text class="text-link compact" @click="saveMedia(photo)">保存</text>
             <text v-if="isVideo(photo) && playingId === photo.id" class="text-link compact" @click="closeVideo">关闭</text>
-            <text v-if="photo.uploader_id === userId" class="delete-link" @click="removeMedia(photo)">{{ demo ? '清理本地' : '清理云端' }}</text>
+            <text v-if="photo.uploader_id === userId" class="delete-link" @click="removeMedia(photo)">清理云端</text>
           </view>
         </view>
       </view>
@@ -51,19 +51,30 @@ import { usePairContext } from '../composables/context'
 import { cloud, downloadMedia, uploadMedia } from '../../../utils/cloud'
 import { chooseImages, chooseOneVideo, inspectMedia, isVideo, persistDemoMedia, restoreDemoMedia, removeDemoMedia, saveMediaToAlbum } from '../../../utils/media'
 
-const { photos, photoFailed, formatDate, userId, deletePhoto, photosMore, loadMorePhotos, demo, busy, tab, entered, toast } = usePairContext()
+// 取得相册列表与失败状态、成员信息、分页状态与加载方法、删除与日期格式化方法，以及演示、忙碌、导航、登录和提示能力。
+const { photos, photoFailed, formatDate, userId, deletePhoto, photosMore, loadMorePhotos, busy, tab, entered, toast } = usePairContext()
+// 按媒体标识存储可供图片组件展示的本地路径。
 const imagePaths = ref<Record<string, string>>({})
+// 当前正在播放的视频标识。
 const playingId = ref('')
+// 当前播放器使用的视频本地路径。
 const videoPath = ref('')
+// 正在解析播放路径的视频标识，防止重复打开。
 const downloadingId = ref('')
+// 已解析的媒体路径缓存，同时用于释放临时资源。
 const localPaths = new Map<string, string>()
+// 按媒体标识复用进行中的路径解析任务。
 const pendingPaths = new Map<string, Promise<string>>()
+// 资源操作版本，页面或会话变化后使旧异步结果失效。
 let revision = 0
+// 组件是否已卸载，防止继续处理媒体结果。
 let disposed = false
 
-function persistDemoPhotos() {
+/** 保存演示相册元数据，保留原有缓存中的其他数据。 */
+const persistDemoPhotos = () => {
+  // 合并相册前读取的演示缓存。
   const cache = uni.getStorageSync('pair_demo') || {}
-  uni.setStorageSync('pair_demo', { ...cache, photos: photos.value.map(photo => {
+  uni.setStorageSync('pair_demo', { ...cache, photos: photos.value.map(/** 为当前演示媒体生成可持久化的记录。 */ photo => {
     // Web blob URLs expire on restart; IndexedDB holds the actual file.
     // #ifdef WEB
     if (photo.demo_media) return { ...photo, local: '' }
@@ -72,23 +83,30 @@ function persistDemoPhotos() {
   }) })
 }
 
-function closeVideo() { playingId.value = ''; videoPath.value = '' }
-function releasePaths() {
+/** 清空视频标识和播放路径，关闭当前播放。 */
+const closeVideo = () => { playingId.value = ''; videoPath.value = '' }
+/** 使旧操作失效，清理路径缓存并释放网页临时资源。 */
+const releasePaths = () => {
   revision++
   closeVideo(); downloadingId.value = ''; imagePaths.value = {}; pendingPaths.clear()
   // #ifdef WEB
+  // 遍历已缓存路径，逐一释放其中的临时对象地址。
   for (const path of localPaths.values()) if (path.startsWith('blob:')) URL.revokeObjectURL(path)
   // #endif
   localPaths.clear()
 }
 
-async function resolvePath(photo: any): Promise<string> {
+/** 复用或解析指定媒体的本地路径，只缓存仍有效的结果。 */
+const resolvePath = async (photo: any): Promise<string> => {
   if (localPaths.has(photo.id)) return localPaths.get(photo.id)!
   if (pendingPaths.has(photo.id)) return pendingPaths.get(photo.id)!
+  // 路径解析开始时的版本，用于检测资源状态变化。
   const currentRevision = revision
+  /** 执行并共享本条媒体的路径解析任务。 */
   const task = (async () => {
-    const path = demo.value ? await restoreDemoMedia(photo) : photo.local || await downloadMedia(photo.storage_path)
-    if (disposed || currentRevision !== revision || !photos.value.some(p => p.id === photo.id)) {
+    // 从演示存储、已有路径或云端下载取得的本地资源地址。
+    const path = photo.local || await downloadMedia(photo.storage_path)
+    if (disposed || currentRevision !== revision || !photos.value.some(/** 判断当前记录是否仍在相册中。 */ p => p.id === photo.id)) {
       // #ifdef WEB
       if (path.startsWith('blob:')) URL.revokeObjectURL(path)
       // #endif
@@ -98,60 +116,68 @@ async function resolvePath(photo: any): Promise<string> {
     if (!isVideo(photo)) imagePaths.value[photo.id] = path
     photoFailed.value[photo.id] = false
     return path
-  })().finally(() => { if (pendingPaths.get(photo.id) === task) pendingPaths.delete(photo.id) })
+  })().finally(/** 仅清理本任务对应的待解析缓存。 */ () => { if (pendingPaths.get(photo.id) === task) pendingPaths.delete(photo.id) })
   pendingPaths.set(photo.id, task)
   return task
 }
 
-async function addMedia(kind: 'image' | 'video') {
+/** 选择并逐项收藏图片或视频，汇总成功数量与失败原因。 */
+const addMedia = async (kind: 'image' | 'video') => {
   if (busy.value) return
   busy.value = true
+  // 批次开始时的资源版本，防止切换状态后继续写入。
   const currentRevision = revision
-  const isDemo = demo.value
+  // 本批次媒体所属的用户标识快照。
   const owner = userId.value
+  // 各失败项的序号与原因，用于最终汇总提示。
   const failures: string[] = []
+  // 本批次已成功收藏的文件数量。
   let saved = 0
+  // 是否已展示加载提示，供异常与结束时清理。
   let loading = false
   try {
+    // 用户本次选取的待处理文件列表。
     const files = kind === 'video' ? await chooseOneVideo() : await chooseImages()
     if (!files.length || currentRevision !== revision) return
     loading = true
     uni.showLoading({ title: '准备收藏…', mask: true })
+    // 当前文件索引，同时用于进度和失败序号提示。
     for (let i = 0; i < files.length; i++) {
       if (currentRevision !== revision || disposed) break
       uni.showLoading({ title: '收藏 ' + (i + 1) + '/' + files.length, mask: true })
       try {
+        // 当前需要收藏的文件。
         const file = files[i]
+        // 检测得到的媒体类型、名称等元数据。
         const metadata = await inspectMedia(file.path, kind, file.name)
         if (currentRevision !== revision || disposed) break
+        // 当前文件保存后生成或由云端返回的相册记录。
         let rows: any[]
-        if (isDemo) {
-          const id = 'local-' + Date.now() + '-' + Math.random().toString(36).slice(2)
-          const local = await persistDemoMedia(file.path, id, metadata)
-          rows = [{ ...metadata, id, uploader_id: owner, local, demo_media: true, created_at: new Date().toISOString() }]
-          if (currentRevision !== revision || disposed) { await removeDemoMedia(rows[0]); break }
-        } else {
+
           rows = await uploadMedia(file.path, metadata)
-        }
+
         if (currentRevision !== revision || disposed) break
-        for (const row of rows) if (!photos.value.some(p => p.id === row.id)) photos.value.unshift(row)
-        if (isDemo) persistDemoPhotos()
+        // 逐条合并保存结果，已存在相同标识时不重复插入。
+        for (const row of rows) if (!photos.value.some(/** 检查待合并记录是否已存在。 */ p => p.id === row.id)) photos.value.unshift(row)
         saved++
       } catch (e: any) { failures.push('第 ' + (i + 1) + ' 项：' + (e?.message || '收藏失败')) }
     }
     if (currentRevision !== revision || disposed) return
     if (loading) { uni.hideLoading(); loading = false }
     if (failures.length) uni.showModal({ title: '已收藏 ' + saved + ' 项，失败 ' + failures.length + ' 项', content: failures.join('\n'), showCancel: false })
-    else toast('已收藏 ' + saved + ' 项' + (isDemo ? '（本地演示）' : ''))
+    else toast('已收藏 ' + saved + ' 项')
   } catch (e: any) { if (currentRevision === revision && !disposed) toast(e?.message || '无法添加媒体') }
   finally { if (loading) uni.hideLoading(); busy.value = false }
 }
 
-async function previewMedia(photo: any) {
+/** 解析所选媒体路径后预览图片或打开视频播放。 */
+const previewMedia = async (photo: any) => {
   if (isVideo(photo) && downloadingId.value) return
+  // 预览开始时的版本，避免展示旧会话资源。
   const currentRevision = revision
   if (isVideo(photo)) { closeVideo(); downloadingId.value = photo.id }
   try {
+    // 当前媒体可用于预览或播放的本地路径。
     const path = await resolvePath(photo)
     if (currentRevision !== revision || disposed) return
     if (isVideo(photo)) { videoPath.value = path; playingId.value = photo.id }
@@ -160,15 +186,18 @@ async function previewMedia(photo: any) {
   finally { if (downloadingId.value === photo.id) downloadingId.value = '' }
 }
 
-function videoError(photo: any) {
+/** 播放失败时关闭视频、清理路径并提示重试方式。 */
+const videoError = (photo: any) => {
   closeVideo(); localPaths.delete(photo.id)
-  if (!demo.value) photo.local = ''
   toast('视频无法播放，请重试或保存后使用系统播放器打开')
 }
 
-async function saveMedia(photo: any) {
+/** 解析媒体本地路径并保存到系统相册。 */
+const saveMedia = async (photo: any) => {
+  // 保存开始时的资源版本，避免处理失效资源。
   const currentRevision = revision
   try {
+    // 将要交给系统相册保存的媒体路径。
     const path = await resolvePath(photo)
     if (currentRevision !== revision || disposed) return
     await saveMediaToAlbum(path, isVideo(photo))
@@ -176,21 +205,14 @@ async function saveMedia(photo: any) {
   } catch (e: any) { if (currentRevision === revision && !disposed) toast(e?.message || '保存失败') }
 }
 
-async function removeMedia(photo: any) {
+/** 删除演示或云端媒体，并清理对应的播放和路径缓存。 */
+const removeMedia = async (photo: any) => {
+  // 删除开始时的资源版本，防止确认或请求后跨状态操作。
   const currentRevision = revision
-  if (demo.value) {
-    const confirmed = await new Promise<boolean>(resolve => uni.showModal({ title: '清理本地回忆', content: '确定删除此演示文件？请先保存到手机。', success: r => resolve(r.confirm), fail: () => resolve(false) }))
-    if (!confirmed || currentRevision !== revision) return
-    try {
-      await removeDemoMedia(photo)
-      if (currentRevision !== revision || disposed) return
-      photos.value = photos.value.filter(p => p.id !== photo.id)
-      persistDemoPhotos()
-      toast('本地回忆已清理')
-    } catch (e: any) { toast(e?.message || '清理失败'); return }
-  } else await deletePhoto(photo)
-  if (!photos.value.some(p => p.id === photo.id)) {
+await deletePhoto(photo)
+  if (!photos.value.some(/** 检查删除后记录是否仍然存在。 */ p => p.id === photo.id)) {
     if (playingId.value === photo.id) closeVideo()
+    // 已删除媒体的缓存路径，用于释放网页临时地址。
     const path = localPaths.get(photo.id) || ''
     // #ifdef WEB
     if (path.startsWith('blob:')) URL.revokeObjectURL(path)
@@ -199,30 +221,75 @@ async function removeMedia(photo: any) {
   }
 }
 
-watch(() => [demo.value, userId.value, cloud.url, cloud.session?.user?.id || '', entered.value], releasePaths, { flush: 'sync' })
-watch(tab, () => { if (tab.value !== 'photos') { revision++; closeVideo(); downloadingId.value = '' } })
-watch(() => photos.value.map(p => p.id + ':' + p.local).join('|'), async () => {
-  if (!demo.value) return
+watch(/** 监听用户、项目、会话与登录状态以隔离资源缓存。 */ () => [userId.value, cloud.url, cloud.session?.user?.id || '', entered.value], releasePaths, { flush: 'sync' })
+watch(tab, /** 离开相册时停止播放并使旧资源操作失效。 */ () => { if (tab.value !== 'photos') { revision++; closeVideo(); downloadingId.value = '' } })
+watch(/** 生成相册记录及路径的变化标记。 */ () => photos.value.map(/** 提取当前媒体的标识与本地路径。 */ p => p.id + ':' + p.local).join('|'), /** 演示相册变化后恢复尚未缓存的图片路径。 */ async () => {
+  // 本轮恢复的资源版本，用于停止过期的预加载。
   const currentRevision = revision
+  // 逐条检查需要恢复路径的演示媒体。
   for (const photo of photos.value) {
     if (currentRevision !== revision || disposed) return
     if (isVideo(photo) || !photo.demo_media || localPaths.has(photo.id)) continue
     try { await resolvePath(photo) } catch (_) { if (currentRevision === revision && !disposed) photoFailed.value[photo.id] = true }
   }
 }, { immediate: true })
+/** 卸载时停止异步回写并释放全部路径资源。 */
 onUnmounted(() => { disposed = true; releasePaths() })
 </script>
 
-<style>
-@import '../styles/shared.css';
-.photo-grid { display: flex; flex-direction: row; flex-wrap: wrap; justify-content: space-between; }
-.photo-card { width: 48%; border-radius: 12px; background-color: #fffdf9; border: 1px solid #ece3d7; overflow: hidden; margin-bottom: 14px; }
-.photo-image { width: 100%; height: 180px; }
-.photo-placeholder { height: 180px; align-items: center; justify-content: center; background-color: #eee5da; }
-.photo-info { padding: 11px; }
-.photo-name { color: #72604e; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.photo-actions { display: flex; flex-direction: row; justify-content: space-between; margin-top: 10px; }
-.delete-link { color: #a7998a; font-size: 10px; }
-.media-hint { margin-bottom: 14px; }
-.video-label { color: #72604e; font-size: 16px; margin-bottom: 10px; }
+<style lang="scss">
+@import '../styles/shared.scss';
+
+.photo-grid {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: space-between;
+}
+.photo-card {
+  width: 48%;
+  border-radius: 12px;
+  background-color: $pair-color-surface;
+  border: 1px solid #ece3d7;
+  overflow: hidden;
+  margin-bottom: 14px;
+}
+.photo-image {
+  width: 100%;
+  height: 180px;
+}
+.photo-placeholder {
+  height: 180px;
+  align-items: center;
+  justify-content: center;
+  background-color: #eee5da;
+}
+.photo-info {
+  padding: 11px;
+}
+.photo-name {
+  color: #72604e;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.photo-actions {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  margin-top: 10px;
+}
+.delete-link {
+  color: #a7998a;
+  font-size: 10px;
+}
+.media-hint {
+  margin-bottom: 14px;
+}
+.video-label {
+  color: #72604e;
+  font-size: 16px;
+  margin-bottom: 10px;
+}
 </style>

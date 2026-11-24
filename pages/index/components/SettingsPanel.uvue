@@ -7,14 +7,14 @@
       <view class="avatar peach"><text class="person-letter">{{ myName.slice(0, 1) }}</text></view>
       <view class="grow">
         <text class="section-title">{{ myName }}</text>
-        <text class="subtle">{{ demo ? '本地演示身份' : cloud.session?.user.email }}</text>
+        <text class="subtle">{{ cloud.session?.user.email }}</text>
       </view>
-      <text class="note-tag">{{ demo ? '演示' : '私密成员' }}</text>
+      <text class="note-tag">私密成员</text>
     </view>
     <view class="settings-card">
       <view class="setting-row" @click="configOpen = true">
         <text class="setting-title">Supabase 项目连接</text>
-        <text class="setting-value">{{ demo ? '尚未连接' : cloud.status }} ›</text>
+        <text class="setting-value">{{ cloud.status }} ›</text>
       </view>
       <view class="setting-row" @click="refreshAll">
         <text class="setting-title">刷新同步数据</text>
@@ -24,7 +24,7 @@
         <text class="setting-title">导出笔记</text>
         <text class="setting-value">Markdown ›</text>
       </view>
-      <view v-if="!demo" class="setting-row" @click="passwordOpen = true">
+      <view class="setting-row" @click="passwordOpen = true">
         <text class="setting-title">修改登录密码</text>
         <text class="setting-value">›</text>
       </view>
@@ -37,7 +37,7 @@
       <text class="tip-title">关于这个小世界</text>
       <text class="tip-content">仅限两个预置成员使用。私密笔记只对作者开放，共享笔记两人可见。实时提示需要应用处于在线状态，暂不提供离线推送。</text>
     </view>
-    <button class="logout-button" @click="signOut">{{ demo ? '退出本地演示' : '退出登录' }}</button>
+    <button class="logout-button" @click="signOut">退出登录</button>
     <text class="home-footnote">我们俩 · 1.0.0</text>
     <view v-if="passwordOpen" class="overlay">
       <scroll-view class="password-modal" direction="vertical" :style="{ height: passwordModalHeight + 'px' }">
@@ -61,45 +61,63 @@
 import { onUnmounted, ref, watch } from 'vue'
 import { usePairContext } from '../composables/context'
 import { changeAccountPassword } from '../../../utils/password'
+// 设置页共享上下文，提供账户与缓存操作。
 const context = usePairContext()
-const { myName, demo, cloud, configOpen, refreshAll, clearCache, signOut, userId } = context
+// 取得用户、演示与连接信息、配置开关，以及刷新、清缓存和退出方法。
+const { myName, cloud, configOpen, refreshAll, clearCache, signOut, userId } = context
+// 修改密码弹窗的显示状态。
 const passwordOpen = ref(false)
+// 密码请求是否进行中，防止重复提交。
 const passwordBusy = ref(false)
+// 密码弹窗可用高度，扣除上下边距。
 const passwordModalHeight = ref(Math.max(0, uni.getWindowInfo().windowHeight - 40))
+// 用于重新验证身份的当前密码输入。
 const oldPassword = ref('')
+// 待设置的新密码输入。
 const newPassword = ref('')
+// 二次确认的新密码输入。
 const confirmPassword = ref('')
+// 组件是否已卸载，阻止异步结果回写。
 let disposed = false
+// 密码提交代次，取消或重试后使旧请求失效。
 let passwordAttempt = 0
-function currentScope() { return JSON.stringify([cloud.url, cloud.key, userId.value, demo.value]) }
+/** 生成项目、密钥、用户的鉴权作用域快照。 */
+const currentScope = () => { return JSON.stringify([cloud.url, cloud.key, userId.value]) }
 
-function clearPasswords() {
+/** 清空所有密码输入，避免敏感信息残留。 */
+const clearPasswords = () => {
   oldPassword.value = ''
   newPassword.value = ''
   confirmPassword.value = ''
 }
-function closePassword() {
+/** 关闭弹窗、清理输入并使旧密码请求失效。 */
+const closePassword = () => {
   passwordAttempt++
   passwordOpen.value = false
   clearPasswords()
   passwordBusy.value = false
 }
-watch(() => [cloud.url, cloud.key, userId.value, demo.value], () => {
+watch(/** 监听密码操作所属的连接与身份。 */ () => [cloud.url, cloud.key, userId.value], /** 作用域改变时关闭弹窗并更新可用高度。 */ () => {
   closePassword()
   passwordModalHeight.value = Math.max(0, uni.getWindowInfo().windowHeight - 40)
 })
+/** 卸载时标记失效并清理密码输入。 */
 onUnmounted(() => { disposed = true; clearPasswords() })
-function showMessage(title: string, content: string) {
+/** 展示无需确认后续操作的账户提示。 */
+const showMessage = (title: string, content: string) => {
   uni.showModal({ title, content, showCancel: false })
 }
-async function submitPassword() {
+/** 校验密码并提交修改，仅在原鉴权作用域内处理结果。 */
+const submitPassword = async () => {
   if (passwordBusy.value) return
   if (!oldPassword.value || !newPassword.value) { showMessage('信息不完整', '请填写旧密码和新密码。'); return }
   if (newPassword.value.length < 8) { showMessage('新密码过短', '新密码至少需要 8 位。'); return }
   if (newPassword.value !== confirmPassword.value) { showMessage('密码不一致', '两次输入的新密码不一致。'); return }
   if (newPassword.value === oldPassword.value) { showMessage('密码未变化', '新密码不能与旧密码相同。'); return }
   passwordBusy.value = true
+  // 提交时的鉴权作用域，避免切换账户或项目后处理旧结果。
   const scope = currentScope()
+  // 本次提交的唯一代次，避免取消或后续请求被旧响应覆盖。
   const attempt = ++passwordAttempt
   try {
     await changeAccountPassword(cloud.url, cloud.key, String(cloud.session?.user?.email || ''), oldPassword.value, newPassword.value, userId.value, currentScope)
@@ -119,19 +137,94 @@ async function submitPassword() {
 }
 </script>
 
-<style>
-@import '../styles/shared.css';
-.profile-card { display: flex; flex-direction: row; align-items: center; padding: 22px 0; }
-.settings-card { border: 1px solid #eae2d6; border-radius: 14px; background-color: #fffdf8; padding: 0 17px; }
-.setting-row { display: flex; flex-direction: row; justify-content: space-between; align-items: center; padding: 20px 0; border-bottom: 1px solid #f0e9df; }
-.setting-value { color: #ae9b86; font-size: 11px; }
-.logout-button { background-color: #f2e9df; color: #a1745d; border: 1px solid #e8d9c9; font-size: 13px; border-radius: 10px; margin-top: 28px; }
-.overlay { position: fixed; left: 0; right: 0; top: 0; bottom: 0; z-index: 20; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 20px; background-color: rgba(49, 39, 31, 0.48); }
-.password-modal { width: 100%; box-sizing: border-box; padding: 24px 20px; border-radius: 14px; background-color: #fffdf8; }
-.modal-title { color: #55483d; font-size: 20px; font-weight: 600; margin: 10px 0 20px; }
-.field-label { color: #7c6958; font-size: 12px; margin: 12px 0 7px; }
-.password-input { height: 44px; box-sizing: border-box; padding: 0 12px; border: 1px solid #e9dfd2; border-radius: 8px; background-color: #f8f4ee; color: #55483d; font-size: 14px; }
-.modal-copy { color: #9f8e7e; font-size: 12px; line-height: 20px; margin: 14px 0; }
-.primary { background-color: #7d8871; color: #fff; font-size: 14px; border-radius: 9px; }
-.text-link { color: #9a8068; text-align: center; font-size: 13px; margin-top: 15px; padding: 8px; }
+<style lang="scss">
+@import '../styles/shared.scss';
+
+.profile-card {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  padding: 22px 0;
+}
+.settings-card {
+  border: 1px solid #eae2d6;
+  border-radius: 14px;
+  background-color: #fffdf8;
+  padding: 0 17px;
+}
+.setting-row {
+  @include pair-flex(row, center, space-between);
+  padding: 20px 0;
+  border-bottom: 1px solid #f0e9df;
+}
+.setting-value {
+  color: #ae9b86;
+  font-size: 11px;
+}
+.logout-button {
+  background-color: #f2e9df;
+  color: #a1745d;
+  border: 1px solid #e8d9c9;
+  font-size: 13px;
+  border-radius: 10px;
+  margin-top: 28px;
+}
+.overlay {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 20;
+  @include pair-flex(column, center, center);
+  padding: 20px;
+  background-color: rgba(49, 39, 31, 0.48);
+}
+.password-modal {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 24px 20px;
+  border-radius: 14px;
+  background-color: #fffdf8;
+}
+.modal-title {
+  color: #55483d;
+  font-size: 20px;
+  font-weight: 600;
+  margin: 10px 0 20px;
+}
+.field-label {
+  color: #7c6958;
+  font-size: 12px;
+  margin: 12px 0 7px;
+}
+.password-input {
+  height: 44px;
+  box-sizing: border-box;
+  padding: 0 12px;
+  border: 1px solid #e9dfd2;
+  border-radius: 8px;
+  background-color: #f8f4ee;
+  color: #55483d;
+  font-size: 14px;
+}
+.modal-copy {
+  color: #9f8e7e;
+  font-size: 12px;
+  line-height: 20px;
+  margin: 14px 0;
+}
+.primary {
+  background-color: #7d8871;
+  color: #fff;
+  font-size: 14px;
+  border-radius: 9px;
+}
+.text-link {
+  color: #9a8068;
+  text-align: center;
+  font-size: 13px;
+  margin-top: 15px;
+  padding: 8px;
+}
 </style>
