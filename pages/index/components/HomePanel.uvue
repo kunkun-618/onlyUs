@@ -37,6 +37,24 @@
         <text class="miss-count">双向奔赴的日常</text>
       </view>
     </view>
+    <view class="today-history">
+      <view class="section-heading history-heading">
+        <text class="section-title">今天的想念</text>
+        <text class="text-link history-link" @click="openHistory">查看详情 ›</text>
+      </view>
+      <view v-if="todayRecords.length" class="today-list">
+        <view v-for="(item, index) in todayRecords" :key="item.id" class="today-row" :class="{ 'row-last': index === todayRecords.length - 1 }">
+          <text class="activity-heart today-heart">♥</text>
+          <view class="grow">
+            <text class="activity-title">{{ item.sender_id === userId ? '你' : partnerName }} 说：想你了</text>
+            <text class="subtle">{{ formatTime(item.created_at) }}</text>
+          </view>
+        </view>
+      </view>
+      <view v-else class="activity-card today-empty">
+        <text class="subtle">今天还没有想念记录</text>
+      </view>
+    </view>
     <view class="section-heading">
       <text class="section-title">把日常，慢慢收藏</text>
       <text class="subtle">OUR EVERYDAY</text>
@@ -67,7 +85,7 @@
       <text class="section-title">最近的小动静</text>
       <text class="subtle">JUST BETWEEN US</text>
     </view>
-    <view class="activity-card">
+    <view class="activity-card" @click="openHistory">
       <view class="activity-dot"></view>
       <view class="grow">
         <text class="activity-title">{{ latestMiss ? (latestMiss.sender_id === userId ? '你' : partnerName) + ' 说：想你了' : '还没有想念记录' }}</text>
@@ -76,12 +94,144 @@
       <text class="activity-heart">♥</text>
     </view>
     <text class="home-footnote">世界很大，这里刚好容下我们俩。</text>
+    <view v-if="historyOpen" class="overlay" @click="closeHistory">
+      <scroll-view class="modal history-modal" :class="{ 'history-modal-compact': compactModal }" direction="vertical" @click.stop>
+        <view class="history-top">
+          <text class="eyebrow">OUR LITTLE MOMENTS</text>
+          <text class="modal-title">想念记录</text>
+          <text class="history-close" @click="closeHistory">×</text>
+        </view>
+        <text class="field-label">起止日期（YYYY-MM-DD，留空为全部）</text>
+        <view class="date-row">
+          <input v-model="startDate" class="input history-input" placeholder="开始日期" />
+          <text class="date-separator">至</text>
+          <input v-model="endDate" class="input history-input" placeholder="结束日期" />
+        </view>
+        <text class="field-label">发送人</text>
+        <view class="sender-row">
+          <text class="sender-option" :class="{ 'sender-selected': senderFilter === 'all' }" @click="senderFilter = 'all'">全部</text>
+          <text class="sender-option" :class="{ 'sender-selected': senderFilter === 'me' }" @click="senderFilter = 'me'">我</text>
+          <text class="sender-option sender-last" :class="{ 'sender-selected': senderFilter === 'partner' }" @click="senderFilter = 'partner'">对方</text>
+        </view>
+        <button class="primary history-submit" :disabled="historyLoading" @click="runHistoryQuery">{{ historyLoading ? '查询中…' : '查询' }}</button>
+        <text v-if="historyError" class="history-error">{{ historyError }}</text>
+        <view v-for="(item, index) in historyRows" :key="item.id" class="history-row" :class="{ 'row-last': index === historyRows.length - 1 }">
+          <view class="grow">
+            <text class="activity-title">{{ item.sender_id === userId ? '你' : partnerName }} 说：想你了</text>
+            <text class="subtle">{{ formatTime(item.created_at) }}</text>
+          </view>
+          <text class="activity-heart">♥</text>
+        </view>
+        <text v-if="!historyLoading && !historyRows.length && !historyError" class="history-empty">没有符合条件的记录</text>
+        <text v-if="historyMore && !historyLoading" class="text-link history-more" @click="loadHistoryPage">加载更多</text>
+        <text v-if="historyLoading && historyRows.length" class="history-status">正在加载…</text>
+        <text class="text-link history-dismiss" @click="closeHistory">关闭</text>
+      </scroll-view>
+    </view>
   </view>
 </template>
 
 <script setup lang="ts">
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { usePairContext } from '../composables/context'
-const { today, myName, partnerName, sendMiss, heartActive, demo, todayMiss, switchTab, latestMiss, userId, formatTime } = usePairContext()
+import { cloud, request } from '../../../utils/cloud'
+const context = usePairContext()
+const { today, myName, partnerName, sendMiss, heartActive, demo, todayMiss, switchTab, latestMiss, userId, formatTime, misses } = context
+const todayRecords = computed(() => [...context.todayMisses.value])
+const historyOpen = ref(false)
+const startDate = ref('')
+const endDate = ref('')
+const senderFilter = ref('all')
+const historyRows = ref<any[]>([])
+const historyLoading = ref(false)
+const historyMore = ref(false)
+const historyError = ref('')
+const compactModal = ref(uni.getWindowInfo().windowHeight < 540)
+let historyGeneration = 0
+let historyScope = ''
+let activeFilters = { start: '', end: '', sender: 'all' }
+function currentScope() { return JSON.stringify([cloud.url, cloud.key, userId.value, demo.value]) }
+function closeHistory() {
+  historyOpen.value = false
+  historyGeneration++
+  historyLoading.value = false
+}
+function openHistory() {
+  historyOpen.value = true
+  startDate.value = ''
+  endDate.value = ''
+  senderFilter.value = 'all'
+  historyRows.value = []
+  historyMore.value = false
+  historyError.value = ''
+  runHistoryQuery()
+}
+function validDate(value: string) {
+  if (!value) return true
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const date = new Date(value + 'T00:00:00')
+  return Number.isFinite(date.getTime()) && date.getFullYear() === Number(value.slice(0, 4)) && date.getMonth() + 1 === Number(value.slice(5, 7)) && date.getDate() === Number(value.slice(8, 10))
+}
+function localDayAfter(value: string) {
+  const date = new Date(value + 'T00:00:00')
+  date.setDate(date.getDate() + 1)
+  return date.toISOString()
+}
+function runHistoryQuery() {
+  if (!validDate(startDate.value) || !validDate(endDate.value)) { historyError.value = '日期格式或日期值无效，请使用 YYYY-MM-DD'; return }
+  if (startDate.value && endDate.value && startDate.value > endDate.value) { historyError.value = '开始日期不能晚于结束日期'; return }
+  historyGeneration++
+  historyScope = currentScope()
+  activeFilters = { start: startDate.value, end: endDate.value, sender: senderFilter.value }
+  historyRows.value = []
+  historyMore.value = false
+  historyError.value = ''
+  historyLoading.value = false
+  loadHistoryPage()
+}
+async function loadHistoryPage() {
+  if (historyLoading.value) return
+  const generation = historyGeneration
+  const scope = historyScope
+  const { start, end, sender } = activeFilters
+  const cursor = historyRows.value[historyRows.value.length - 1]
+  historyLoading.value = true
+  try {
+    let rows: any[]
+    if (demo.value) {
+      const cache = uni.getStorageSync('pair_demo')
+      rows = (cache?.misses || misses.value).filter((item: any) => {
+        const timestamp = Date.parse(item.created_at)
+        const senderMatch = sender === 'all' || item.sender_id === (sender === 'me' ? userId.value : partnerId())
+        return (!start || timestamp >= new Date(start + 'T00:00:00').getTime()) && (!end || timestamp < new Date(localDayAfter(end)).getTime()) && senderMatch && (!cursor || item.created_at < cursor.created_at || (item.created_at === cursor.created_at && String(item.id) < String(cursor.id)))
+      }).sort((a: any, b: any) => b.created_at.localeCompare(a.created_at) || String(b.id).localeCompare(String(a.id))).slice(0, 50)
+    } else {
+      const filters = ['select=*', 'order=created_at.desc,id.desc', 'limit=50']
+      if (start) filters.push('created_at=gte.' + encodeURIComponent(new Date(start + 'T00:00:00').toISOString()))
+      if (end) filters.push('created_at=lt.' + encodeURIComponent(localDayAfter(end)))
+      if (sender !== 'all') filters.push('sender_id=eq.' + encodeURIComponent(sender === 'me' ? userId.value : partnerId()))
+      if (cursor) filters.push('or=' + encodeURIComponent('(created_at.lt.' + cursor.created_at + ',and(created_at.eq.' + cursor.created_at + ',id.lt.' + cursor.id + '))'))
+      rows = await request('/rest/v1/miss_you_logs?' + filters.join('&'))
+    }
+    if (generation !== historyGeneration || scope !== currentScope() || !historyOpen.value) return
+    historyRows.value.push(...rows)
+    historyMore.value = rows.length === 50
+  } catch (error: any) {
+    if (generation === historyGeneration && scope === currentScope()) historyError.value = error?.message || '记录加载失败，请重试'
+  } finally {
+    if (generation === historyGeneration) historyLoading.value = false
+  }
+}
+function partnerId() { return demo.value ? 'demo-partner' : context.members.value.find((member: any) => member.user_id !== userId.value)?.user_id || '' }
+watch(() => currentScope(), () => {
+  historyGeneration++
+  historyRows.value = []
+  historyMore.value = false
+  historyLoading.value = false
+  if (historyOpen.value) { historyScope = currentScope(); runHistoryQuery() }
+})
+watch(() => uni.getWindowInfo().windowHeight, height => { compactModal.value = height < 540 })
+onUnmounted(() => { historyGeneration++ })
 </script>
 
 <style>
@@ -125,4 +275,30 @@ const { today, myName, partnerName, sendMiss, heartActive, demo, todayMiss, swit
 .activity-dot { width: 7px; height: 7px; background-color: #bd8a74; border-radius: 4px; margin-right: 12px; }
 .activity-title { font-size: 12px; color: #726355; line-height: 22px; }
 .activity-heart { color: #c89583; font-size: 18px; }
+.today-history { margin-top: 8px; }
+.history-heading { margin-bottom: 8px; }
+.history-link { padding: 4px 0; }
+.today-list { display: flex; flex-direction: column; padding: 0 14px; background-color: #fffdfa; border: 1px solid #eee7de; border-radius: 12px; }
+.today-row, .history-row { display: flex; flex-direction: row; align-items: center; padding: 12px 0; border-bottom: 1px solid #f0e9df; }
+.row-last { border-bottom-width: 0; }
+.today-heart { margin-right: 12px; }
+.today-empty { justify-content: center; min-height: 54px; padding: 10px; }
+.history-modal { display: flex; flex-direction: column; height: 460px; padding: 20px; }
+.history-modal-compact { height: 300px; padding: 16px; }
+.history-top { display: flex; flex-direction: row; align-items: center; justify-content: space-between; }
+.modal-title { margin: 5px 0 10px; }
+.history-close { color: #927d6d; font-size: 26px; padding: 0 4px; }
+.field-label { margin: 10px 0 7px; }
+.date-row { display: flex; flex-direction: row; align-items: center; }
+.history-input { flex: 1; min-width: 0; padding: 0 8px; font-size: 11px; }
+.date-separator { color: #927d6d; font-size: 11px; padding: 0 7px; }
+.sender-row { display: flex; flex-direction: row; }
+.sender-option { flex: 1; text-align: center; padding: 9px 0; margin-right: 8px; border-radius: 8px; background-color: #f6f0e8; color: #927d6d; font-size: 12px; }
+.sender-last { margin-right: 0; }
+.sender-selected { background-color: #ead9cc; color: #8c5f4e; }
+.history-submit { margin: 12px 0 6px; }
+.history-row { padding: 10px 2px; }
+.history-error { color: #ae5749; font-size: 11px; line-height: 18px; }
+.history-empty, .history-status { color: #a79d93; font-size: 11px; padding: 16px 0; text-align: center; }
+.history-more, .history-dismiss { padding: 9px 0; }
 </style>

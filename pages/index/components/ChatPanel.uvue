@@ -12,18 +12,22 @@
       <text class="section-title">从一句「在干嘛」开始</text>
       <text class="subtle">你发出的每一句话，都会被好好保存。</text>
     </view>
-    <view v-for="message in messages" :key="message.id" class="message-row" :class="{ 'message-self': message.sender_id === userId }">
+    <view v-for="message in displayMessages" :key="message.id" class="message-row" :class="{ 'message-self': message.sender_id === userId }">
       <text class="message-who">{{ message.sender_id === userId ? '我' : partnerName }} · {{ formatTime(message.created_at) }}</text>
       <view class="message-bubble" :class="{ 'bubble-self': message.sender_id === userId }">
-        <text class="message-content">{{ message.content }}</text>
+        <image v-if="message.sticker" class="message-sticker" :src="message.sticker.src" mode="aspectFit" />
+        <text v-else class="message-content">{{ message.content }}</text>
       </view>
     </view>
   </view>
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { usePairContext } from '../composables/context'
+import { resolveSticker } from '../../../utils/stickers'
 const { partnerName, demo, cloud, hasMore, loadOlder, loadingHistory, messages, userId, formatTime } = usePairContext()
+const displayMessages = computed(() => messages.value.map(message => ({ ...message, sticker: resolveSticker(message.content) })))
 </script>
 
 <style>
@@ -36,4 +40,5 @@ const { partnerName, demo, cloud, hasMore, loadOlder, loadingHistory, messages, 
 .message-bubble { max-width: 520px; align-self: flex-start; margin-right: 24px; background-color: #fffdf9; border: 1px solid #eee3d6; border-radius: 0 14px 14px 14px; padding: 12px 15px; box-sizing: border-box; }
 .bubble-self { align-self: flex-end; margin-left: 24px; margin-right: 0; background-color: #ead8c8; border-color: #ead8c8; border-radius: 14px 0 14px 14px; }
 .message-content { color: #655143; font-size: 14px; line-height: 24px; white-space: pre-wrap; }
+.message-sticker { width: 128px; height: 128px; }
 </style>

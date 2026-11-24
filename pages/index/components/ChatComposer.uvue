@@ -1,18 +1,64 @@
 <template>
   <view class="composer">
-    <input v-model="messageText" class="message-input" placeholder="说点什么，让我靠近你一点…" :maxlength="10000" confirm-type="send" @confirm="sendMessage" />
-    <button class="send-button" :disabled="sending" @click="sendMessage">发送</button>
+    <view class="composer-row">
+      <button class="emoji-toggle" @click="panelOpen = !panelOpen">{{ panelOpen ? '收起' : '表情' }}</button>
+      <input v-model="messageText" class="message-input" placeholder="说点什么，让我靠近你一点…" :maxlength="10000" :disabled="sending" confirm-type="send" @confirm="sendMessage" />
+      <button class="send-button" :disabled="sending || !messageText.trim()" @click="sendMessage">发送</button>
+    </view>
+    <view v-if="panelOpen" class="emoji-panel">
+      <text class="panel-label">小小心情 · 点击加入输入框</text>
+      <view class="emoji-grid">
+        <button v-for="emoji in emojis" :key="emoji" class="emoji-item" :disabled="sending" @click="insertEmoji(emoji)">{{ emoji }}</button>
+      </view>
+      <text class="panel-label">专属表情 · 点击直接发送</text>
+      <view class="sticker-grid">
+        <view v-for="sticker in stickers" :key="sticker.key" class="sticker-item" @click="sendSticker(sticker.content)">
+          <image class="sticker-preview" :src="sticker.src" mode="aspectFit" />
+          <text class="sticker-label">{{ sticker.label }}</text>
+        </view>
+      </view>
+    </view>
   </view>
 </template>
 
 <script setup lang="ts">
+import { ref } from 'vue'
 import { usePairContext } from '../composables/context'
-const { messageText, sendMessage, sending } = usePairContext()
+import { resolveSticker, stickers } from '../../../utils/stickers'
+const { messageText, sendMessage, sending, userId, cloud, demo } = usePairContext()
+const panelOpen = ref(false)
+const emojis = ['😀', '🥰', '😘', '🥹', '😂', '😊', '😭', '🤗', '❤️', '💕', '🌷', '🌙', '✨', '🎉', '👍', '🫶']
+
+function insertEmoji(emoji: string) {
+  if (!sending.value && messageText.value.length + emoji.length <= 10000) messageText.value += emoji
+}
+
+async function sendSticker(content: string) {
+  if (sending.value || !resolveSticker(content)) return
+  const draft = messageText.value
+  const scope = [userId.value, cloud.url, demo.value]
+  messageText.value = content
+  try { await sendMessage() }
+  finally {
+    // 会话未变时恢复草稿，避免退出或切换账号后写回旧文字。
+    if (scope[0] === userId.value && scope[1] === cloud.url && scope[2] === demo.value && (!messageText.value || messageText.value === content)) messageText.value = draft
+  }
+}
 </script>
 
 <style>
 @import '../styles/shared.css';
-.composer { display: flex; flex-direction: row; align-items: center; padding: 12px 16px; background-color: #f6f0e8; }
-.message-input { flex: 1; border-radius: 10px; background-color: #fffdf9; padding: 10px 12px; font-size: 12px; height: 42px; box-sizing: border-box; }
+.composer { display: flex; flex-direction: column; padding: 12px 16px; background-color: #f6f0e8; }
+.composer-row { display: flex; flex-direction: row; align-items: center; width: 100%; }
+.message-input { flex: 1; min-width: 0; border-radius: 10px; background-color: #fffdf9; padding: 10px 12px; font-size: 12px; height: 42px; box-sizing: border-box; }
 .send-button { margin-left: 9px; background-color: #b97b66; color: #fffaf4; font-size: 12px; border-radius: 8px; line-height: 40px; padding: 0 16px; }
+.emoji-toggle { margin-right: 8px; padding: 0 8px; line-height: 40px; border-radius: 8px; background-color: #ead8c8; color: #655143; font-size: 12px; }
+.emoji-panel { display: flex; flex-direction: column; padding-top: 14px; width: 100%; }
+.panel-label { color: #927d6d; font-size: 11px; line-height: 24px; }
+.emoji-grid { display: flex; flex-direction: row; flex-wrap: wrap; padding: 4px 0 10px; }
+.emoji-item { width: 12.5%; margin: 0; padding: 0; line-height: 40px; font-size: 24px; background-color: #f6f0e8; border: 0; }
+.sticker-grid { display: flex; flex-direction: row; flex-wrap: wrap; }
+.sticker-item { display: flex; flex-direction: column; align-items: center; width: 25%; margin: 0; padding: 6px 0; background-color: #f6f0e8; border: 0; }
+.sticker-preview { width: 58px; height: 58px; }
+.sticker-label { color: #927d6d; font-size: 11px; line-height: 22px; }
 </style>

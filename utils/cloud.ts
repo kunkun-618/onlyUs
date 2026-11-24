@@ -1,4 +1,5 @@
 import { reactive } from 'vue'
+import { inspectMedia, validateMedia, mediaExtension, type MediaMetadata } from './media'
 
 export const cloud = reactive({
   url: String(uni.getStorageSync('pair_url') || ''),
@@ -160,18 +161,30 @@ export function watchChanges(onChange: (table: string, row: any) => void, onResy
   return () => { stopped = true; clearInterval(heartbeat); clearTimeout(reconnect); socket?.close({}); cloud.status = '未连接' }
 }
 
-export async function uploadPhoto(filePath: string) {
+export async function uploadPhoto(filePath: string, metadata?: MediaMetadata) {
+  return uploadMedia(filePath, metadata || await inspectMedia(filePath, 'image'))
+}
+export async function uploadMedia(filePath: string, metadata: MediaMetadata) {
+  validateMedia(metadata)
+  const version = authVersion
   const access = await token()
-  const path = cloud.session.user.id + '/' + Date.now() + '_' + Math.random().toString(36).slice(2) + '.jpg'
+  if (version !== authVersion) throw new Error('登录会话已变更')
+  const path = cloud.session.user.id + '/' + Date.now() + '_' + Math.random().toString(36).slice(2) + '.' + mediaExtension(metadata.mime_type)
   await new Promise<void>((resolve, reject) => uni.uploadFile({
     url: cloud.url + '/storage/v1/object/photos/' + path, filePath, name: 'file',
     header: { apikey: cloud.key, Authorization: 'Bearer ' + access, 'x-upsert': 'false' },
-    success: (r: any) => r.statusCode >= 200 && r.statusCode < 300 ? resolve() : reject(new Error('照片上传失败：' + r.data)),
-    fail: () => reject(new Error('照片上传失败，请重试'))
+    formData: { contentType: metadata.mime_type }, timeout: 120000,
+    success: (r: any) => r.statusCode >= 200 && r.statusCode < 300 ? resolve() : reject(new Error('媒体上传失败：' + r.data)),
+    fail: () => reject(new Error('媒体上传失败，请重试'))
   }))
   try {
-    return await request('/rest/v1/photos', 'POST', { storage_path: path, file_name: '照片_' + Date.now() + '.jpg' })
+    if (version !== authVersion) throw new Error('登录会话已变更')
+    return await request('/rest/v1/photos', 'POST', {
+      storage_path: path, file_name: metadata.file_name, media_type: metadata.media_type,
+      mime_type: metadata.mime_type, size_bytes: metadata.size_bytes
+    })
   } catch (e) {
+    if (version !== authVersion) throw e
     // A timed-out metadata insert may have committed; never delete its object blindly.
     const rows = await request('/rest/v1/photos?storage_path=eq.' + encodeURIComponent(path))
     if (rows.length) return rows
@@ -180,11 +193,20 @@ export async function uploadPhoto(filePath: string) {
   }
 }
 export async function downloadPhoto(path: string): Promise<string> {
+  return downloadMedia(path)
+}
+export async function downloadMedia(path: string): Promise<string> {
+  const version = authVersion
   const access = await token()
+  if (version !== authVersion) throw new Error('登录会话已变更')
   return new Promise((resolve, reject) => uni.downloadFile({
     url: cloud.url + '/storage/v1/object/authenticated/photos/' + path.split('/').map(encodeURIComponent).join('/'),
     header: { apikey: cloud.key, Authorization: 'Bearer ' + access },
-    success: (r: any) => r.statusCode === 200 ? resolve(r.tempFilePath) : reject(new Error('无法下载照片')),
-    fail: () => reject(new Error('照片下载失败'))
+    timeout: 120000,
+    success: (r: any) => {
+      if (version !== authVersion) { reject(new Error('登录会话已变更')); return }
+      r.statusCode === 200 ? resolve(r.tempFilePath) : reject(new Error('无法下载媒体文件'))
+    },
+    fail: () => reject(new Error('媒体下载失败'))
   }))
 }

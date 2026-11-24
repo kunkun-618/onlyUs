@@ -1,5 +1,7 @@
 import { computed, onUnmounted, ref } from 'vue'
 import { cloud, configured, saveConfig, login, logout, clearSession, request, watchChanges, uploadPhoto, downloadPhoto } from '../../../utils/cloud'
+import { readChatCache, writeChatCache, removeChatCache } from '../../../utils/chatCache'
+import { exportNoteFile } from '../../../utils/noteExport'
 
 export function usePairApp() {
   const tabs = [{ key: 'home', label: '我们', icon: '♥' }, { key: 'chat', label: '聊天', icon: '☏' }, { key: 'photos', label: '相册', icon: '▧' }, { key: 'notes', label: '笔记', icon: '✎' }, { key: 'settings', label: '设置', icon: '⚙' }]
@@ -8,6 +10,8 @@ export function usePairApp() {
   const demo = ref(false)
   const busy = ref(false)
   const sending = ref(false)
+  const exporting = ref(false)
+  const now = ref(Date.now())
   const email = ref('')
   const password = ref('')
   const messages = ref<any[]>([])
@@ -41,6 +45,9 @@ export function usePairApp() {
   let refreshPromise: Promise<void> | null = null
   let refreshAgain = false
   let generation = 0
+  let synced: string | null = null
+  let chatInitialized = false
+  let signingOut = false
   let lastRefresh = 0
   let foreground = true
   const photoLoading = new Set<string>()
@@ -48,8 +55,9 @@ export function usePairApp() {
   const userId = computed(() => demo.value ? 'demo-me' : cloud.session?.user.id || '')
   const myName = computed(() => demo.value ? '小满' : members.value.find(m => m.user_id === userId.value)?.display_name || '我')
   const partnerName = computed(() => demo.value ? '阿屿' : members.value.find(m => m.user_id !== userId.value)?.display_name || '你')
-  const today = new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' })
-  const todayMiss = computed(() => misses.value.filter(m => new Date(m.created_at).toDateString() === new Date().toDateString()).length)
+  const today = computed(() => new Date(now.value).toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' }))
+  const todayMisses = computed(() => misses.value.filter(m => new Date(m.created_at).toDateString() === new Date(now.value).toDateString()))
+  const todayMiss = computed(() => todayMisses.value.length)
   const latestMiss = computed(() => misses.value[0])
   const filteredNotes = computed(() => notes.value.filter(n => noteFilter.value === 'all' || n.visibility === noteFilter.value))
   function toast(title: string) { uni.showToast({ title, icon: 'none' }) }
@@ -58,8 +66,33 @@ export function usePairApp() {
   function formatTime(value: string) { return formatDate(value) + ' ' + new Date(value).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) }
   function confirm(content: string): Promise<boolean> { return new Promise(resolve => uni.showModal({ title: '请确认', content, success: r => resolve(r.confirm), fail: () => resolve(false) })) }
   function localId() { return 'local-' + Date.now() + '-' + Math.random().toString(36).slice(2) }
+  // Date preserves milliseconds only; retain the remaining Postgres fractional digits.
+  function compareMessages(a: any, b: any): number {
+    const milliseconds = Date.parse(a.created_at) - Date.parse(b.created_at)
+    const fraction = (value: string) => ((value.match(/\.(\d+)/)?.[1] || '').padEnd(9, '0')).slice(3, 9)
+    return milliseconds || fraction(a.created_at).localeCompare(fraction(b.created_at)) || a.id.localeCompare(b.id)
+  }
+  function persistChat() {
+    if (!demo.value && cloud.session) {
+      const ordered = [...messages.value].sort(compareMessages)
+      writeChatCache(cloud.url, userId.value, ordered.slice(-500), hasMore.value || ordered.length > 500, synced || undefined)
+    }
+  }
+  function removeCurrentChat() {
+    if (!demo.value && cloud.session) removeChatCache(cloud.url, userId.value)
+  }
+  function restoreChat() {
+    const cache = readChatCache(cloud.url, userId.value)
+    messages.value = cache ? [...cache.messages].sort(compareMessages) : []
+    hasMore.value = cache?.hasMore || false
+    synced = cache?.syncedAt || (messages.value.length ? messages.value[0].created_at : null)
+    chatInitialized = !!synced
+  }
+  function afterCursor(row: any) {
+    return 'or=' + encodeURIComponent('(created_at.gt.' + row.created_at + ',and(created_at.eq.' + row.created_at + ',id.gt.' + row.id + '))')
+  }
   function persistDemo() { if (demo.value) uni.setStorageSync('pair_demo', { messages: messages.value, misses: misses.value, notes: notes.value, photos: photos.value }) }
-  function bottom() { scrollTarget.value = ''; setTimeout(() => { scrollTarget.value = 'chat-end' }, 100) }
+  function bottom() { const revision = generation; scrollTarget.value = ''; setTimeout(() => { if (revision === generation) scrollTarget.value = 'chat-end' }, 100) }
   function switchTab(key: string) {
     if (tab.value === key) return
     tab.value = key
@@ -68,6 +101,9 @@ export function usePairApp() {
     if (!demo.value && Date.now() - lastRefresh > 30000) refreshAll()
   }
   function startDemo() {
+    if (signingOut) return
+    clearSession()
+    resetData()
     demo.value = true
     entered.value = true
     const cache = uni.getStorageSync('pair_demo')
@@ -78,18 +114,49 @@ export function usePairApp() {
     photos.value = cache?.photos || []
     notesMore.value = false; photosMore.value = false; hasMore.value = false
   }
-  async function signIn() {
-    if (!configured()) { configOpen.value = true; return }
-    if (!email.value.trim() || !password.value) { toast('请填写邮箱和密码'); return }
+  
+  // 登入
+  const signIn = async() => {
+    // 不触发弹框，并修改为硬编码连接
+	  // if (!configured()) {
+	  // 	configOpen.value = true
+	  // 	return
+	  // }
+    cloud.url = 'https://uthkpblfagjhwyyldiby.supabase.co'
+    cloud.key = 'sb_publishable_F9tR-5VbKpwcY-alirLrlg_JoMOzq4o'
+    
+	  // 邮箱和密码空值校验
+	  if (!email.value.trim() || !password.value) {
+		  toast('请填写邮箱和密码')
+		  return
+	  }
+
+	  //
+    if (busy.value || signingOut) return
+
+    resetData()
+    demo.value = false
     busy.value = true
-    try { await login(email.value, password.value); password.value = ''; demo.value = false; await refreshAll(); if (!cloud.session || !members.value.length) throw new Error('初始数据加载失败，请检查网络后重试'); entered.value = true; beginSync() } catch (e) { clearSession(); error(e) } finally { busy.value = false }
+    const revision = generation
+    try {
+      await login(email.value, password.value)
+      if (revision !== generation) return
+      password.value = ''; demo.value = false; restoreChat(); await refreshAll()
+      if (revision !== generation) return
+      if (!cloud.session || !members.value.length) throw new Error('初始数据加载失败，请检查网络后重试')
+      entered.value = true; beginSync()
+    } catch (e) { if (revision === generation) { removeCurrentChat(); clearSession(); resetData(); error(e) } }
+    finally { if (revision === generation) busy.value = false }
   }
   function beginSync() {
     stopRealtime?.()
+    const revision = generation
     stopRealtime = watchChanges((table, row) => {
+      if (revision !== generation) return
       if (table === 'messages') {
         if (!row?.id || messages.value.some(m => m.id === row.id)) return
         messages.value.push(row)
+        messages.value.sort(compareMessages); persistChat()
         if (row.sender_id !== userId.value && tab.value !== 'chat') { unread.value++; toast('收到 ' + partnerName.value + ' 的新消息') }
         if (tab.value === 'chat') bottom()
         return
@@ -101,22 +168,49 @@ export function usePairApp() {
         return
       }
       if (foreground) refreshAll()
-    }, () => { refreshAll() })
+    }, () => { if (revision === generation) refreshAll() })
     clearInterval(poll)
     poll = setInterval(() => { if (foreground) refreshAll() }, 30000)
   }
-  function resetData() {
+  
+  const resetData = () => {
     generation++
-    lastRefresh = 0; photoLoading.clear()
-    refreshPromise = null; refreshAgain = false
-    stopRealtime?.(); stopRealtime = null; clearInterval(poll)
-    messages.value = []; misses.value = []; notes.value = []; photos.value = []; members.value = []
-    photoPaths.clear(); photoFailed.value = {}; unread.value = 0
-    noteOpen.value = false; noteContent.value = ''; noteTitle.value = ''; messageText.value = ''
-    entered.value = false; tab.value = 'home'
+    synced = null
+    chatInitialized = false
+    busy.value = false
+    sending.value = false
+    exporting.value = false
+    loadingHistory.value = false
+    hasMore.value = false
+    notesMore.value = false
+    photosMore.value = false
+    clearTimeout(heartTimer)
+    heartActive.value = false
+    lastRefresh = 0
+    photoLoading.clear()
+    refreshPromise = null
+    refreshAgain = false
+    stopRealtime?.()
+    stopRealtime = null
+    clearInterval(poll)
+    messages.value = []
+    misses.value = []
+    notes.value = []
+    photos.value = []
+    members.value = []
+    photoPaths.clear()
+    photoFailed.value = {}
+    unread.value = 0
+    noteOpen.value = false
+    noteContent.value = ''
+    noteTitle.value = ''
+    messageText.value = ''
+    entered.value = false
+    tab.value = 'home'
   }
   async function applyConfig() {
-    try { saveConfig(configUrl.value, configKey.value); resetData(); clearSession(); demo.value = false; configOpen.value = false; toast('连接已保存，请使用预置账号登录') } catch (e) { error(e) }
+    if (signingOut) return
+    try { removeCurrentChat(); resetData(); saveConfig(configUrl.value, configKey.value); clearSession(); demo.value = false; configOpen.value = false; toast('连接已保存，请使用预置账号登录') } catch (e) { error(e) }
   }
   async function refreshAll() {
     if (demo.value || !cloud.session) return
@@ -124,31 +218,67 @@ export function usePairApp() {
     const revision = generation
     const task = (async () => {
       try {
+        const startedAt = new Date().toISOString()
+        const initial = !chatInitialized
+        const readMessages = async () => {
+          if (initial) return request('/rest/v1/messages?select=*&order=created_at.desc,id.desc&limit=50')
+          const rows: any[] = []
+          const since = new Date(Date.parse(synced!) - 1000).toISOString()
+          let cursor: any = null
+          while (revision === generation) {
+            const page = await request('/rest/v1/messages?select=*&order=created_at.asc,id.asc&limit=100&created_at=gte.' + encodeURIComponent(since) + (cursor ? '&' + afterCursor(cursor) : ''))
+            if (revision !== generation) return []
+            rows.push(...page)
+            if (page.length < 100) break
+            cursor = page[page.length - 1]
+          }
+          return rows
+        }
+        const readTodayMisses = async () => {
+          const start = new Date(now.value); start.setHours(0, 0, 0, 0)
+          const end = new Date(start); end.setDate(end.getDate() + 1)
+          const rows: any[] = []
+          let cursor: any = null
+          while (revision === generation) {
+            const page = await request('/rest/v1/miss_you_logs?select=*&order=created_at.asc,id.asc&limit=100&created_at=gte.' + encodeURIComponent(start.toISOString()) + '&created_at=lt.' + encodeURIComponent(end.toISOString()) + (cursor ? '&' + afterCursor(cursor) : ''))
+            if (revision !== generation) return []
+            rows.push(...page)
+            if (page.length < 100) break
+            cursor = page[page.length - 1]
+          }
+          return rows.reverse()
+        }
         const result = await Promise.all([
           request('/rest/v1/app_members?select=*'),
-          request('/rest/v1/messages?select=*&order=created_at.desc,id.desc&limit=50'),
-          request('/rest/v1/miss_you_logs?select=*&order=created_at.desc,id.desc&created_at=gte.' + encodeURIComponent(new Date(new Date().setHours(0, 0, 0, 0)).toISOString())),
+          readMessages(),
+          readTodayMisses(),
           request('/rest/v1/notes?select=*&order=updated_at.desc,id.desc&limit=' + Math.max(notes.value.length, 50)),
           request('/rest/v1/photos?select=*&order=created_at.desc,id.desc&limit=' + Math.max(photos.value.length, 50))
         ])
         if (revision !== generation) return
-        if (!result[0].some((m: any) => m.user_id === userId.value)) { resetData(); clearSession(); throw new Error('当前账号没有成员权限') }
+        if (!result[0].some((m: any) => m.user_id === userId.value)) { removeCurrentChat(); resetData(); clearSession(); toast('当前账号没有成员权限'); return }
         lastRefresh = Date.now()
         if (JSON.stringify(members.value) !== JSON.stringify(result[0])) members.value = result[0]
         const ids = new Set(messages.value.map(m => m.id))
         const newCount = result[1].filter((m: any) => !ids.has(m.id)).length
         const merged = new Map(messages.value.map(m => [m.id, m]))
         result[1].forEach((m: any) => merged.set(m.id, m))
-        if (newCount) messages.value = Array.from(merged.values()).sort((a: any, b: any) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
-        if (!hasMore.value && messages.value.length <= 50) hasMore.value = result[1].length === 50
-        if (JSON.stringify(misses.value) !== JSON.stringify(result[2])) misses.value = result[2]
+        messages.value = Array.from(merged.values()).sort(compareMessages)
+        if (initial) hasMore.value = result[1].length === 50
+        const fetched = [...result[1]].sort(compareMessages)
+        synced = fetched.length ? fetched[fetched.length - 1].created_at : synced || startedAt
+        chatInitialized = true
+        persistChat()
+        const missRows = new Map<string, any>(result[2].map((m: any) => [m.id, m]))
+        misses.value.forEach(m => { if (!missRows.has(m.id)) missRows.set(m.id, m) })
+        misses.value = Array.from(missRows.values()).sort((a: any, b: any) => -compareMessages(a, b))
         notesMore.value = result[3].length >= Math.max(notes.value.length, 50)
         if (notes.value.length !== result[3].length || notes.value.some((n, i) => n.id !== result[3][i].id || n.updated_at !== result[3][i].updated_at)) notes.value = result[3]
         photosMore.value = result[4].length >= Math.max(photos.value.length, 50)
         if (photos.value.length !== result[4].length || photos.value.some((p, i) => p.id !== result[4][i].id)) photos.value = result[4].map((p: any) => ({ ...p, local: photoPaths.get(p.id) || '' }))
         if (tab.value === 'chat' && newCount) bottom()
         if (tab.value === 'photos') hydratePhotos()
-      } catch (e) { error(e) }
+      } catch (e) { if (revision === generation) error(e) }
     })().finally(() => {
       if (refreshPromise === task) {
         refreshPromise = null
@@ -162,11 +292,11 @@ export function usePairApp() {
     const revision = generation
     for (const photo of photos.value) {
       if (revision !== generation || tab.value !== 'photos' || !foreground) return
-      if (photo.local || photoFailed.value[photo.id] || photoLoading.has(photo.id)) continue
+      if (photo.media_type === 'video' || photo.local || photoFailed.value[photo.id] || photoLoading.has(photo.id)) continue
       photoLoading.add(photo.id)
       try { const path = await downloadPhoto(photo.storage_path); if (revision !== generation) return; photoPaths.set(photo.id, path); const current = photos.value.find(p => p.id === photo.id); if (current) current.local = path }
       catch (_) { if (revision === generation) photoFailed.value[photo.id] = true }
-      finally { photoLoading.delete(photo.id) }
+      finally { if (revision === generation) photoLoading.delete(photo.id) }
     }
   }
   async function loadOlder() {
@@ -181,7 +311,8 @@ export function usePairApp() {
       const seen = new Set(messages.value.map(m => m.id))
       messages.value = [...rows.filter((m: any) => !seen.has(m.id)).reverse(), ...messages.value]
       hasMore.value = rows.length === 50
-    } catch (e) { error(e) } finally { loadingHistory.value = false }
+      messages.value.sort(compareMessages); persistChat()
+    } catch (e) { if (revision === generation) error(e) } finally { if (revision === generation) loadingHistory.value = false }
   }
   async function sendMessage() {
     const content = messageText.value.trim()
@@ -192,8 +323,9 @@ export function usePairApp() {
       const row = demo.value ? { id: localId(), sender_id: userId.value, content, created_at: new Date().toISOString() } : (await request('/rest/v1/messages', 'POST', { content }))[0]
       if (revision !== generation) return
       if (!messages.value.some(m => m.id === row.id)) messages.value.push(row)
+      messages.value.sort(compareMessages); persistChat()
       messageText.value = ''; persistDemo(); bottom()
-    } catch (e) { error(e) } finally { sending.value = false }
+    } catch (e) { if (revision === generation) error(e) } finally { if (revision === generation) sending.value = false }
   }
   async function sendMiss() {
     if (heartActive.value) return
@@ -204,7 +336,7 @@ export function usePairApp() {
       if (revision !== generation) return
       if (!misses.value.some(m => m.id === row.id)) misses.value.unshift(row)
       persistDemo(); toast(demo.value ? '已记录一份想念（本地演示）' : '想念已送出 ♥')
-    } catch (e) { error(e) } finally { heartTimer = setTimeout(() => { heartActive.value = false }, 1800) }
+    } catch (e) { if (revision === generation) error(e) } finally { if (revision === generation) heartTimer = setTimeout(() => { heartActive.value = false }, 1800) }
   }
   async function loadMoreNotes() {
     const revision = generation
@@ -223,6 +355,7 @@ export function usePairApp() {
     if (busy.value || noteReadOnly.value) return
     if (!noteTitle.value.trim() && !noteContent.value.trim()) { toast('写点什么再保存吧'); return }
     busy.value = true
+    const revision = generation
     try {
       const data = { title: noteTitle.value.trim(), content: noteContent.value, visibility: noteShared.value ? 'shared' : 'private' }
       if (demo.value) {
@@ -232,11 +365,12 @@ export function usePairApp() {
         notes.value = [row, ...notes.value.filter(n => n.id !== row.id)]; persistDemo()
       } else {
         const rows = await request('/rest/v1/notes' + (editingId.value ? '?id=eq.' + editingId.value : ''), editingId.value ? 'PATCH' : 'POST', data)
+        if (revision !== generation) return
         if (!rows.length) throw new Error('没有编辑权限，或笔记已被删除')
         notes.value = [rows[0], ...notes.value.filter(n => n.id !== rows[0].id)]
       }
       noteOpen.value = false; toast('小心事已保存')
-    } catch (e) { error(e) } finally { busy.value = false }
+    } catch (e) { if (revision === generation) error(e) } finally { if (revision === generation) busy.value = false }
   }
   async function deleteNote() {
     if (!await confirm('确定删除这篇笔记吗？删除后无法恢复。')) return
@@ -274,48 +408,84 @@ export function usePairApp() {
     } catch (e) { error(e) }
   }
   async function exportNotes() {
+    if (exporting.value) return
+    exporting.value = true
+    const revision = generation
+    let text = ''
     try {
-      let rows = notes.value
+      let rows = [...notes.value]
       if (!demo.value) {
-        rows = []; let offset = 0
-        while (true) { const page = await request('/rest/v1/notes?select=*&order=created_at.asc,id.asc&limit=100&offset=' + offset); rows.push(...page); if (page.length < 100) break; offset += page.length }
+        rows = []; let cursor: any = null
+        while (true) {
+          const page = await request('/rest/v1/notes?select=*&order=created_at.asc,id.asc&limit=100' + (cursor ? '&' + afterCursor(cursor) : ''))
+          if (revision !== generation) return
+          rows.push(...page); if (page.length < 100) break; cursor = page[page.length - 1]
+        }
       }
+      if (revision !== generation) return
       if (!rows.length) { toast('还没有可以导出的笔记'); return }
-      const text = '# 我们俩 · 笔记导出\n\n导出时间：' + new Date().toISOString() + '\n\n' + rows.map(n => '## ' + (n.title || '无题') + '\n\n可见性：' + n.visibility + '\n作者：' + n.owner_id + '\n创建时间：' + n.created_at + '\n更新时间：' + n.updated_at + '\n\n' + n.content + '\n\n---\n').join('\n')
-      // #ifdef WEB
-      const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' })
-      const url = URL.createObjectURL(blob)
-      const link = document.createElement('a'); link.href = url; link.download = 'notes_export_' + new Date().toISOString().slice(0, 10) + '.md'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000)
-      // #endif
-      // #ifndef WEB
-      const fs = uni.getFileSystemManager()
-      const path = uni.env.USER_DATA_PATH + '/notes_export_' + new Date().toISOString().slice(0, 10) + '.md'
-      fs.writeFile({ filePath: path, data: text, encoding: 'utf8', success: () => uni.showModal({ title: '笔记已导出', content: 'Markdown 文件已保存到应用文件目录：\n' + path, showCancel: false }), fail: () => toast('导出失败，无法写入本地文件') })
-      // #endif
-    } catch (e) { error(e) }
+      text = '# 我们俩 · 笔记导出\n\n导出时间：' + new Date().toISOString() + '\n\n' + rows.map(n => '## ' + (n.title || '无题') + '\n\n可见性：' + n.visibility + '\n作者：' + n.owner_id + '\n创建时间：' + n.created_at + '\n更新时间：' + n.updated_at + '\n\n' + n.content + '\n\n---\n').join('\n')
+      const destination = await exportNoteFile(text)
+      if (revision !== generation) return
+      uni.showModal({ title: '笔记已导出', content: destination, showCancel: false })
+    } catch (e: any) {
+      if (revision !== generation) return
+      if (!text) { error(e); return }
+      const copy = await new Promise<boolean>(resolve => uni.showModal({ title: '导出失败', content: (e?.message || '无法生成文件') + '\n是否复制笔记内容作为备份？', confirmText: '复制内容', success: r => resolve(r.confirm), fail: () => resolve(false) }))
+      if (!copy || revision !== generation) return
+      await new Promise<void>(resolve => uni.setClipboardData({ data: text, showToast: false, success: () => { if (revision === generation) toast('笔记内容已复制'); resolve() }, fail: () => { if (revision === generation) toast('复制失败，请稍后重新导出'); resolve() } }))
+    } finally { if (revision === generation) exporting.value = false }
   }
   async function clearCache() {
+    const revision = generation
     if (!await confirm('将清理图片临时文件和内存列表；云端数据及登录状态保留。')) return
+    if (revision !== generation) return
+    removeCurrentChat()
     // #ifndef WEB
     const fs = uni.getFileSystemManager()
     for (const path of photoPaths.values()) fs.unlink({ filePath: path })
     // #endif
-    photoPaths.clear(); photoFailed.value = {}
-    if (!demo.value) { photos.value = []; notes.value = []; messages.value = []; await refreshAll() }
+    if (!demo.value) {
+      const wasEntered = entered.value
+      const currentTab = tab.value
+      resetData(); entered.value = wasEntered; tab.value = currentTab
+      const reloadRevision = generation
+      await refreshAll()
+      if (reloadRevision !== generation) return
+      if (cloud.session && entered.value) beginSync()
+    } else { photoPaths.clear(); photoFailed.value = {} }
     toast('本地缓存已刷新')
   }
-  async function signOut() {
-    if (!await confirm(demo.value ? '确定退出本地演示？演示数据保留在此设备。' : '确定退出当前账号？')) return
-    try { if (!demo.value) await logout() } catch (_) { clearSession() }
-    resetData(); demo.value = false
+  async function finishSignOut() {
+    if (signingOut) return
+    signingOut = true
+    const wasDemo = demo.value
+    removeCurrentChat()
+    resetData()
+    const revision = generation
+    try { if (!wasDemo) await logout() }
+    catch (_) { /* Local session cleanup is completed below. */ }
+    finally { signingOut = false; if (revision === generation) { clearSession(); resetData(); demo.value = false } }
   }
-  function handleShow() { foreground = true; if (entered.value && !demo.value) { if (Date.now() - lastRefresh > 10000) refreshAll(); if (tab.value === 'photos') hydratePhotos() } }
+  async function signOut() {
+    const revision = generation
+    if (!await confirm(demo.value ? '确定退出本地演示？演示数据保留在此设备。' : '确定退出当前账号？')) return
+    if (revision !== generation) return
+    await finishSignOut()
+  }
+  function updateNow() {
+    const previousDay = new Date(now.value).toDateString()
+    now.value = Date.now()
+    if (previousDay !== new Date(now.value).toDateString() && entered.value && !demo.value) refreshAll()
+  }
+  const clock = setInterval(updateNow, 1000)
+  function handleShow() { foreground = true; updateNow(); if (entered.value && !demo.value) { if (Date.now() - lastRefresh > 10000) refreshAll(); if (tab.value === 'photos') hydratePhotos() } }
   function handleHide() { foreground = false }
-  onUnmounted(() => { stopRealtime?.(); clearInterval(poll); clearTimeout(heartTimer) })
-  if (configured() && cloud.session) { entered.value = true; refreshAll(); beginSync() }
+  onUnmounted(() => { resetData(); clearInterval(clock) })
+  if (configured() && cloud.session) { restoreChat(); entered.value = true; refreshAll(); beginSync() }
   return {
-    tabs, tab, entered, demo, busy, sending, email, password, messages, misses, notes, photos, members, unread, messageText, scrollTarget, heartActive, hasMore, loadingHistory, notesMore, photosMore, photoFailed, configOpen, configUrl, configKey, noteOpen, noteTitle, noteContent, noteShared, editingId, noteReadOnly, noteFilter,
-    cloud, configured, userId, myName, partnerName, today, todayMiss, latestMiss, filteredNotes,
-    toast, formatDate, formatTime, switchTab, startDemo, signIn, applyConfig, refreshAll, loadOlder, sendMessage, sendMiss, loadMoreNotes, loadMorePhotos, editNote, closeNote, saveNote, deleteNote, addPhoto, previewPhoto, savePhoto, deletePhoto, exportNotes, clearCache, signOut, handleShow, handleHide
+    tabs, tab, entered, demo, busy, sending, exporting, email, password, messages, misses, notes, photos, members, unread, messageText, scrollTarget, heartActive, hasMore, loadingHistory, notesMore, photosMore, photoFailed, configOpen, configUrl, configKey, noteOpen, noteTitle, noteContent, noteShared, editingId, noteReadOnly, noteFilter,
+    cloud, configured, userId, myName, partnerName, today, todayMiss, todayMisses, latestMiss, filteredNotes,
+    toast, formatDate, formatTime, switchTab, startDemo, signIn, applyConfig, refreshAll, loadOlder, sendMessage, sendMiss, loadMoreNotes, loadMorePhotos, editNote, closeNote, saveNote, deleteNote, addPhoto, previewPhoto, savePhoto, deletePhoto, exportNotes, clearCache, signOut, finishSignOut, handleShow, handleHide
   }
 }

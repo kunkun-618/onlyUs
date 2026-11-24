@@ -6,7 +6,7 @@
 
 1. 在 Supabase 项目 Authentication 设置中关闭 **Allow new users to sign up**（公开注册），关闭不使用的登录方式及匿名登录，仅保留邮箱密码登录。
 2. 在 Authentication → Users 手工创建两个邮箱密码账号，勾选自动确认邮箱或由管理员完成邮箱确认。记录各自 UUID；不要通过客户端注册。密码重置由管理员处理。
-3. 在 SQL Editor 中以 `postgres` 管理员完整执行 `setup.sql`。先建表和权限，再填写成员。此时成员表为空，任何客户端账号都不能读取业务数据。
+3. 新项目在 SQL Editor 中以 `postgres` 管理员完整执行 `setup.sql`，再填写成员。已部署且已有用户/数据的项目只执行 `migrations/20261124_media.sql`，它仅增量添加媒体字段及 bucket 限制，不删库、不重建表、不删除用户或数据。不要为已有部署重新初始化或清空数据。先建表和权限，再填写成员；此时成员表为空，任何客户端账号都不能读取业务数据。
 4. 将下面的占位 UUID 和昵称换成真实值，在 SQL Editor 单独执行。不要把占位值直接运行：
 
    ```sql
@@ -20,12 +20,14 @@
    commit;
    ```
 
-5. 检查 Storage 中 `photos` bucket 为 **Private**；检查 Realtime publication 包含 `messages`、`miss_you_logs`、`notes`、`photos`。保留 Supabase 默认 Storage 管理架构、API 角色授权和 `storage.objects` RLS，不要手动关闭其 RLS。
+5. 检查 Storage 中 `photos` bucket 为 **Private**，单文件上限 50 MiB，允许 MIME 类型仅为 `image/jpeg`、`image/png`、`image/webp`、`image/gif`、`video/mp4`；检查 Realtime publication 包含 `messages`、`miss_you_logs`、`notes`、`photos`。保留 Supabase 默认 Storage 管理架构、API 角色授权和 `storage.objects` RLS，不要手动关闭其 RLS。
 6. 在项目 API 设置获取项目地址和 **anon key**，交给前端；在 API 暴露 schema 中保留 `public`，不要暴露 `app_private`。使用下文的权限验收清单验证。
 
 两人上限采用**管理员管理**，没有数据库硬性数量约束：`app_members` 仅管理员可写，客户端只有成员读取权限。管理员必须始终只维护两个 UUID；Auth 中即使存在第三个用户，只要未加入成员表，也不能访问本应用数据。不要添加第三名成员。更换账号时应先删除旧成员再插入新成员，并在 Auth 后台禁用旧账号。业务外键指向 `auth.users`，删除成员白名单不会删除其历史数据。直接删除有历史数据的 Auth 用户可能被外键阻止；更换成员不需要删除 Auth 用户。
 
-可重复执行 `setup.sql`：不会清空表或重新填入成员，策略、触发器和授权会重新配置，publication 不会重复添加表。脚本面向新项目或本脚本已初始化的项目；`CREATE TABLE IF NOT EXISTS` 不会迁移其他来源的同名表。业务表的全部旧 RLS 策略会被替换，请勿在这些表混用其他业务策略。
+`setup.sql` 面向新项目或本脚本已初始化的项目；重复执行不会清空表或重新填入成员，但会重新配置策略、触发器和授权。它不是既有生产项目的通用迁移脚本，业务表上的旧 RLS 策略会被替换。已存在用户与业务数据的项目按上一步只执行 `migrations/20261124_media.sql`，不要删除或重建数据库对象。
+
+迁移文件 `migrations/20261124_media.sql` 仅适用于已经存在 `public.photos` 和 Supabase `storage.buckets` 的部署；先备份并在 SQL Editor 以管理员执行，再核对列、约束及 bucket 限制。它不删除用户、数据或表。全新环境执行 `setup.sql` 即可，不要执行任何删库/删表/重建操作。
 
 已有 Storage 项目必须先检查 `pg_policies` 中 `storage.objects` 的其他策略。PostgreSQL 宽松策略按 OR 合并，任何允许所有登录用户访问的旧策略都可能绕过本脚本的限制。删除或将其严格限定到其他 bucket 后再上线；本脚本仅替换 `app_photos_*`，不会擅自删除其他 bucket 的策略：
 
@@ -45,7 +47,7 @@ select count(*) as member_count from public.app_members; -- 应为 2
 | `messages` | `id uuid`、`sender_id uuid`、`content text`、`created_at timestamptz` | 两成员可读；只能以本人身份新增，不支持编辑或删除 |
 | `miss_you_logs` | `id uuid`、`sender_id uuid`、`created_at timestamptz` | 两成员可读；只能以本人身份新增，不支持编辑或删除 |
 | `notes` | `id uuid`、`owner_id uuid`、`title text`、`content text`、`visibility text`、`created_at/updated_at timestamptz` | 自己的全部笔记及对方 `shared` 笔记可读；仅 owner 可新增、编辑、删除 |
-| `photos` | `id uuid`、`uploader_id uuid`、唯一 `storage_path text`、`file_name text`、`created_at timestamptz` | 两成员可读；只能新增、删除本人的元数据，不支持修改 |
+| `photos` | `id uuid`、`uploader_id uuid`、唯一 `storage_path text`、`file_name text`、`media_type text`（默认 `image`，仅 `image/video`）、`mime_type text`、`size_bytes bigint`（可空、非负）、`created_at timestamptz` | 两成员可读；只能新增、删除本人的元数据，不支持修改 |
 
 ID 和时间由数据库生成，身份字段默认当前登录用户。客户端不得提交 `id`、`created_at`、`updated_at`；也不得修改 owner/sender/uploader。笔记可编辑列仅 `title/content/visibility`，`updated_at` 由触发器维护。`visibility` 默认为 `private`，只接受 `private/shared`。时间返回带时区的 ISO 8601 字符串，前端按本地时区显示。
 
@@ -92,8 +94,8 @@ Content-Type: application/json
 | 编辑笔记 | `PATCH /rest/v1/notes?id=eq.NOTE_ID` | `{"content":"新正文","visibility":"shared"}` |
 | 删除笔记 | `DELETE /rest/v1/notes?id=eq.NOTE_ID` | 无 |
 | 照片列表 | `GET /rest/v1/photos?select=*&order=created_at.desc,id.desc&limit=50` | 无 |
-| 新增照片元数据 | `POST /rest/v1/photos` | `{"storage_path":"UID/唯一文件名.jpg","file_name":"原始照片.jpg"}` |
-| 删除照片元数据 | `DELETE /rest/v1/photos?id=eq.PHOTO_ID` | 无 |
+| 新增媒体元数据 | `POST /rest/v1/photos` | `{"storage_path":"UID/唯一文件名.mp4","file_name":"原始视频.mp4","media_type":"video","mime_type":"video/mp4","size_bytes":123456}` |
+| 删除媒体元数据 | `DELETE /rest/v1/photos?id=eq.PHOTO_ID` | 无 |
 
 聊天历史以 `(created_at,id)` 做游标，避免相同时间记录漏页：下一页保留倒序排序，追加 `or=(created_at.lt.TIME,and(created_at.eq.TIME,id.lt.ID))`，TIME/ID 取上一页最后一条记录；实际发送时编码参数。展示时可将结果反转。单用 `created_at.lt.TIME` 会漏掉时间相同的消息。首次订阅与历史查询结果均按主键去重。
 
@@ -101,13 +103,15 @@ Content-Type: application/json
 
 ## 5. 私有照片：multipart 上传与下载
 
-对象路径统一为 `UID/随机UUID或时间戳加随机串.jpg`，不含 bucket 前缀，不要只用原始文件名。路径首段必须是登录用户 UUID。建议生成 ASCII 文件名，并对路径逐段 URL 编码，保留目录 `/`。`file_name` 单独保存原始显示名称。
+媒体仍保存在私有 `photos` bucket 和 `photos` 表。图片支持 jpg/png/webp/gif，每批最多 9 张；视频仅支持 mp4，单次上传 1 个。客户端选择器和上传逻辑须执行 50 MiB（52,428,800 bytes）单文件限制，bucket 同步强制相同上限及 MIME 白名单。对象路径统一为 `UID/随机UUID或时间戳加随机串.扩展名`，不含 bucket 前缀，不要只用原始文件名。路径首段必须是登录用户 UUID。建议生成 ASCII 文件名，并对路径逐段 URL 编码，保留目录 `/`。`file_name` 单独保存原始显示名称。
+
+新增元数据时显式提交 `media_type`（`image` 或 `video`）、`mime_type`（标准 MIME，如 `image/jpeg`、`video/mp4`）和实际 `size_bytes`（非负整数）；旧记录迁移后默认为 `image`，`mime_type/size_bytes` 可为空。上述大小、MIME 与每批/单次数量规则也需由客户端校验，数据库字段约束不承担文件内容检测或批次控制。
 
 `uni.uploadFile` 可以直接调用 Storage 的标准上传接口，支持 **multipart/form-data POST**：
 
 ```text
-url: BASE + /storage/v1/object/photos/UID/唯一文件名.jpg
-filePath: 本地图片临时路径
+url: BASE + /storage/v1/object/photos/UID/唯一文件名.扩展名
+filePath: 本地图片或视频临时路径
 name: file
 header:
   apikey: ANON_KEY
@@ -123,8 +127,8 @@ formData:
 
 | 操作 | 方法与相对地址 | 约定 |
 | --- | --- | --- |
-| 上传 | `POST /storage/v1/object/photos/UID/唯一文件名.jpg` | 上述 multipart，两个成员各自只能写本人目录 |
-| 下载 | `GET /storage/v1/object/authenticated/photos/UID/唯一文件名.jpg` | 带 `apikey` 和用户 Bearer token，返回文件字节；两成员可读 |
+| 上传 | `POST /storage/v1/object/photos/UID/唯一文件名.扩展名` | 上述 multipart，两个成员各自只能写本人目录；图片 9 张/批，视频 1 个/次 |
+| 下载 | `GET /storage/v1/object/authenticated/photos/UID/唯一文件名.扩展名` | 带 `apikey` 和用户 Bearer token，返回文件字节；两成员可读 |
 | 删除文件 | `DELETE /storage/v1/object/photos` | JSON：`{"prefixes":["UID/唯一文件名.jpg"]}`，只能删除本人目录 |
 
 下载可用 `uni.downloadFile` 并传请求头，成功后再保存到手机。不要使用 `/object/public/` URL，bucket 为私有。不要持久化公开 URL 或含 token 的临时 URL，数据库只存 `storage_path`。本方案直接带 JWT 下载，不依赖签名 URL；已下载到对方设备的副本无法远程撤回。
@@ -171,6 +175,12 @@ Supabase Postgres Changes 的 DELETE 事件不能按原行 SELECT RLS 精确过�
 
 成员被移除后，新 REST 请求不再可访问业务数据；前端同时应断开会话并清缓存。移除成员不等于清除既有本地数据，也不等于立刻吊销所有已签发 JWT。
 
+### Android 后台通知边界
+
+Realtime WebSocket 仅适用于 App 活跃且连接存续期间的实时同步；Android 进入后台或进程被系统挂起后，WebSocket 不保证保活，心跳和自动重连不能替代系统推送。本项目当前未实现推送服务、凭证管理、CID 绑定或通知发送。
+
+面向国内 Android，建议优先评估 DCloud uni-push 及适用的厂商离线通道，不以依赖 Google 服务的 FCM 作为默认路径。建议由 Supabase Database Webhook 将业务事件送至受信任的服务端或 Edge Function，再由其调用 uni-push 服务端接口。该方案不要求把 Supabase 迁移到 uniCloud。落地前需开通 DCloud 推送服务、配置包名和签名、按目标厂商完成通道及资质配置，并由客户端注册和提交 CID。服务端密钥只保存在服务端；不得放进客户端或仓库。无实际服务凭据时不配置伪发送代码。详细实施边界见 [../docs/background-notifications.md](../docs/background-notifications.md)。
+
 ## 7. 部署后验收
 
 使用 A、B 两个用户 access token 和一个不在成员表的测试账号分别测试，勿用 service_role 验证 RLS：
@@ -178,8 +188,8 @@ Supabase Postgres Changes 的 DELETE 事件不能按原行 SELECT RLS 精确过�
 1. 无用户 JWT、非成员读取业务表失败或返回空；非成员上传和下载照片失败；客户端不能增删改 `app_members`。
 2. A 新增消息/想你成功，冒充 B 的 `sender_id` 失败；A/B 均可读，客户端不能编辑或删除消息/想你。
 3. A 的 private 笔记仅 A 可读；shared 笔记 B 可读，但 B 的编辑/删除影响 0 行或失败；A 不能修改 `owner_id` 和数据库时间。
-4. A 可 multipart 上传到 A 的目录，不能上传到 B 的目录；B 能带 JWT 下载 A 的照片，但不能删除；未登录无法通过公开 URL 下载。覆盖上传失败。
+4. A 可 multipart 上传到 A 的目录，不能上传到 B 的目录；B 能带 JWT 下载 A 的媒体，但不能删除；未登录无法通过公开 URL 下载。验证 jpg/png/webp/gif 与 mp4 接受，其他 MIME 及超过 50 MiB 拒绝；覆盖上传失败。新元数据可写入 `media_type/mime_type/size_bytes`，非成员或冒充 uploader 的写入失败；既有记录仍在且 `media_type=image`。
 5. A 删除照片文件和本人元数据成功；重复运行 SQL 后权限结果不变、成员与已有数据仍保留、四张表 publication 不重复。
-6. 两账号同时在线：聊天和想你实时到达；notes/photos 新增更新后刷新正确。断线重连补拉不漏记录、不重复展示；shared 撤回后下一次完整拉取清除对方缓存项。
+6. 两账号同时在线：聊天和想你实时到达；notes/photos 新增更新后刷新正确。断线重连补拉不漏记录、不重复展示；shared 撤回后下一次完整拉取清除对方缓存项。另在 Android 后台验证不将 WebSocket 当作推送验收；本项目没有真正后台推送实现。
 
-本交付仅写入本地 SQL 和部署说明，没有连接云账户、执行远端 SQL 或实际验证线上 RLS/上传/Realtime。`setup.sql` 应在目标 Supabase 环境按上述步骤执行并验收后上线。
+本地 SQL 和部署说明不代表已部署：没有连接云账户、执行远端 SQL 或实际验证线上 RLS/上传/Realtime。须在目标 Supabase 环境按上述步骤执行并验收后上线。

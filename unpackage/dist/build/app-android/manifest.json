@@ -25,15 +25,18 @@
         "uni-fileSystemManager": {},
         "uni-media": {},
         "uni-previewImage": {},
+        "uni-clipboard": {},
+        "uni-getSystemInfo": {},
         "uni-network": {},
         "uni-websocket": {},
-        "uni-form": {}
+        "uni-form": {},
+        "uni-video": {}
       },
       "icons": {
-        "hdpi": "",
-        "xhdpi": "",
-        "xxhdpi": "",
-        "xxxhdpi": ""
+        "hdpi": "D:/work/kun/app/onlyUs/static/logo.png",
+        "xhdpi": "D:/work/kun/app/onlyUs/static/logo.png",
+        "xxhdpi": "D:/work/kun/app/onlyUs/static/logo.png",
+        "xxxhdpi": "D:/work/kun/app/onlyUs/static/logo.png"
       },
       "splashScreens": {
         "default": {}

@@ -20,9 +20,13 @@
         <text class="setting-title">刷新同步数据</text>
         <text class="setting-value">↻</text>
       </view>
-      <view class="setting-row" @click="exportNotes">
+      <view class="setting-row" @click="context.exportNotes">
         <text class="setting-title">导出笔记</text>
         <text class="setting-value">Markdown ›</text>
+      </view>
+      <view v-if="!demo" class="setting-row" @click="passwordOpen = true">
+        <text class="setting-title">修改登录密码</text>
+        <text class="setting-value">›</text>
       </view>
       <view class="setting-row" @click="clearCache">
         <text class="setting-title">清理本地缓存</text>
@@ -35,12 +39,84 @@
     </view>
     <button class="logout-button" @click="signOut">{{ demo ? '退出本地演示' : '退出登录' }}</button>
     <text class="home-footnote">我们俩 · 1.0.0</text>
+    <view v-if="passwordOpen" class="overlay">
+      <scroll-view class="password-modal" direction="vertical" :style="{ height: passwordModalHeight + 'px' }">
+        <text class="eyebrow">ACCOUNT SECURITY</text>
+        <text class="modal-title">修改登录密码</text>
+        <text class="field-label">旧密码</text>
+        <input v-model="oldPassword" class="password-input" password placeholder="输入当前密码" />
+        <text class="field-label">新密码</text>
+        <input v-model="newPassword" class="password-input" password placeholder="输入新密码（至少 8 位）" />
+        <text class="field-label">确认新密码</text>
+        <input v-model="confirmPassword" class="password-input" password placeholder="再次输入新密码" />
+        <text class="modal-copy">修改成功后将退出当前会话，需要使用新密码重新登录。</text>
+        <button class="primary" :disabled="passwordBusy" @click="submitPassword">{{ passwordBusy ? '正在修改…' : '确认修改' }}</button>
+        <text class="text-link" @click="closePassword">取消</text>
+      </scroll-view>
+    </view>
   </view>
 </template>
 
 <script setup lang="ts">
+import { onUnmounted, ref, watch } from 'vue'
 import { usePairContext } from '../composables/context'
-const { myName, demo, cloud, configOpen, refreshAll, exportNotes, clearCache, signOut } = usePairContext()
+import { changeAccountPassword } from '../../../utils/password'
+const context = usePairContext()
+const { myName, demo, cloud, configOpen, refreshAll, clearCache, signOut, userId } = context
+const passwordOpen = ref(false)
+const passwordBusy = ref(false)
+const passwordModalHeight = ref(Math.max(0, uni.getWindowInfo().windowHeight - 40))
+const oldPassword = ref('')
+const newPassword = ref('')
+const confirmPassword = ref('')
+let disposed = false
+let passwordAttempt = 0
+function currentScope() { return JSON.stringify([cloud.url, cloud.key, userId.value, demo.value]) }
+
+function clearPasswords() {
+  oldPassword.value = ''
+  newPassword.value = ''
+  confirmPassword.value = ''
+}
+function closePassword() {
+  passwordAttempt++
+  passwordOpen.value = false
+  clearPasswords()
+  passwordBusy.value = false
+}
+watch(() => [cloud.url, cloud.key, userId.value, demo.value], () => {
+  closePassword()
+  passwordModalHeight.value = Math.max(0, uni.getWindowInfo().windowHeight - 40)
+})
+onUnmounted(() => { disposed = true; clearPasswords() })
+function showMessage(title: string, content: string) {
+  uni.showModal({ title, content, showCancel: false })
+}
+async function submitPassword() {
+  if (passwordBusy.value) return
+  if (!oldPassword.value || !newPassword.value) { showMessage('信息不完整', '请填写旧密码和新密码。'); return }
+  if (newPassword.value.length < 8) { showMessage('新密码过短', '新密码至少需要 8 位。'); return }
+  if (newPassword.value !== confirmPassword.value) { showMessage('密码不一致', '两次输入的新密码不一致。'); return }
+  if (newPassword.value === oldPassword.value) { showMessage('密码未变化', '新密码不能与旧密码相同。'); return }
+  passwordBusy.value = true
+  const scope = currentScope()
+  const attempt = ++passwordAttempt
+  try {
+    await changeAccountPassword(cloud.url, cloud.key, String(cloud.session?.user?.email || ''), oldPassword.value, newPassword.value, userId.value, currentScope)
+    if (disposed || passwordAttempt !== attempt || currentScope() !== scope) return
+    passwordOpen.value = false
+    clearPasswords()
+    context.password.value = ''
+    await context.finishSignOut()
+    showMessage('密码已修改', '请使用新密码重新登录。')
+  } catch (e: any) {
+    if (disposed || passwordAttempt !== attempt || currentScope() !== scope) return
+    clearPasswords()
+    showMessage('密码修改失败', e?.message || '请求未成功，请稍后重试。')
+  } finally {
+    if (!disposed && passwordAttempt === attempt) passwordBusy.value = false
+  }
+}
 </script>
 
 <style>
@@ -50,4 +126,12 @@ const { myName, demo, cloud, configOpen, refreshAll, exportNotes, clearCache, si
 .setting-row { display: flex; flex-direction: row; justify-content: space-between; align-items: center; padding: 20px 0; border-bottom: 1px solid #f0e9df; }
 .setting-value { color: #ae9b86; font-size: 11px; }
 .logout-button { background-color: #f2e9df; color: #a1745d; border: 1px solid #e8d9c9; font-size: 13px; border-radius: 10px; margin-top: 28px; }
+.overlay { position: fixed; left: 0; right: 0; top: 0; bottom: 0; z-index: 20; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 20px; background-color: rgba(49, 39, 31, 0.48); }
+.password-modal { width: 100%; box-sizing: border-box; padding: 24px 20px; border-radius: 14px; background-color: #fffdf8; }
+.modal-title { color: #55483d; font-size: 20px; font-weight: 600; margin: 10px 0 20px; }
+.field-label { color: #7c6958; font-size: 12px; margin: 12px 0 7px; }
+.password-input { height: 44px; box-sizing: border-box; padding: 0 12px; border: 1px solid #e9dfd2; border-radius: 8px; background-color: #f8f4ee; color: #55483d; font-size: 14px; }
+.modal-copy { color: #9f8e7e; font-size: 12px; line-height: 20px; margin: 14px 0; }
+.primary { background-color: #7d8871; color: #fff; font-size: 14px; border-radius: 9px; }
+.text-link { color: #9a8068; text-align: center; font-size: 13px; margin-top: 15px; padding: 8px; }
 </style>

@@ -1,45 +1,216 @@
 <template>
   <view class="page">
     <text class="eyebrow">MOMENTS WE KEEP</text>
-    <text class="page-title">把我们，留在照片里。</text>
+    <text class="page-title">把我们，留在回忆里。</text>
     <text class="page-description">每一张，都是舍不得忘记的一天。</text>
     <view class="section-heading">
-      <text class="section-title">共同相册 · {{ photos.length }} 张</text>
-      <text class="text-link compact" @click="addPhoto">＋ 上传照片</text>
+      <text class="section-title">共同相册 · {{ photos.length }} 项</text>
+      <text class="text-link compact" @click="addMedia('image')">＋ 照片</text>
+      <text class="text-link compact" @click="addMedia('video')">＋ 视频</text>
     </view>
+    <text class="subtle media-hint">照片每次最多 9 张；视频每次 1 个，仅限 MP4；单文件不超过 50 MiB。</text>
     <view v-if="!photos.length" class="empty-card">
       <text class="empty-symbol">▧</text>
       <text class="section-title">第一张回忆，等你放进来</text>
       <text class="subtle">私有相册，只向你们两个人开放。</text>
-      <button class="primary" @click="addPhoto">上传一张照片</button>
+      <button class="primary" @click="addMedia('image')">上传照片</button>
     </view>
     <view class="photo-grid">
       <view v-for="photo in photos" :key="photo.id" class="photo-card">
-        <image v-if="photo.local" class="photo-image" :src="photo.local" mode="aspectFill" @click="previewPhoto(photo)" />
-        <view v-else class="photo-placeholder" @click="previewPhoto(photo)">
+        <video v-if="isVideo(photo) && playingId === photo.id && videoPath" class="photo-image" :src="videoPath" :controls="true" :autoplay="true" @error="videoError(photo)" />
+        <view v-else-if="isVideo(photo)" class="photo-placeholder" @click="previewMedia(photo)">
+          <text class="video-label">MP4 · 视频</text>
+          <text class="subtle">{{ downloadingId === photo.id ? '正在下载…' : '轻触下载并播放' }}</text>
+        </view>
+        <image v-else-if="imagePaths[photo.id] || (photo.local && !photo.demo_media)" class="photo-image" :src="imagePaths[photo.id] || photo.local" mode="aspectFill" @click="previewMedia(photo)" />
+        <view v-else class="photo-placeholder" @click="previewMedia(photo)">
           <text class="subtle">{{ photoFailed[photo.id] ? '轻触重试加载' : '照片加载中…' }}</text>
         </view>
         <view class="photo-info">
           <text class="photo-name">{{ photo.file_name }}</text>
           <text class="subtle">{{ formatDate(photo.created_at) }}</text>
           <view class="photo-actions">
-            <text class="text-link compact" @click="savePhoto(photo)">保存</text>
-            <text v-if="photo.uploader_id === userId" class="delete-link" @click="deletePhoto(photo)">清理云端</text>
+            <text class="text-link compact" @click="saveMedia(photo)">保存</text>
+            <text v-if="isVideo(photo) && playingId === photo.id" class="text-link compact" @click="closeVideo">关闭</text>
+            <text v-if="photo.uploader_id === userId" class="delete-link" @click="removeMedia(photo)">{{ demo ? '清理本地' : '清理云端' }}</text>
           </view>
         </view>
       </view>
     </view>
-    <text v-if="photosMore" class="load-more" @click="loadMorePhotos">加载更多照片</text>
+    <text v-if="photosMore" class="load-more" @click="loadMorePhotos">加载更多回忆</text>
     <view class="tip-box">
       <text class="tip-title">让珍贵的回忆，留久一点</text>
-      <text class="tip-content">保存到手机后，可手动清理自己上传的云端照片。清理后，对方也将无法再从相册下载。</text>
+      <text class="tip-content">保存到手机后，可手动清理自己上传的云端照片和视频。清理后，对方也将无法再从相册下载。</text>
     </view>
   </view>
 </template>
 
 <script setup lang="ts">
+import { onUnmounted, ref, watch } from 'vue'
 import { usePairContext } from '../composables/context'
-const { photos, addPhoto, previewPhoto, photoFailed, formatDate, savePhoto, userId, deletePhoto, photosMore, loadMorePhotos } = usePairContext()
+import { cloud, downloadMedia, uploadMedia } from '../../../utils/cloud'
+import { chooseImages, chooseOneVideo, inspectMedia, isVideo, persistDemoMedia, restoreDemoMedia, removeDemoMedia, saveMediaToAlbum } from '../../../utils/media'
+
+const { photos, photoFailed, formatDate, userId, deletePhoto, photosMore, loadMorePhotos, demo, busy, tab, entered, toast } = usePairContext()
+const imagePaths = ref<Record<string, string>>({})
+const playingId = ref('')
+const videoPath = ref('')
+const downloadingId = ref('')
+const localPaths = new Map<string, string>()
+const pendingPaths = new Map<string, Promise<string>>()
+let revision = 0
+let disposed = false
+
+function persistDemoPhotos() {
+  const cache = uni.getStorageSync('pair_demo') || {}
+  uni.setStorageSync('pair_demo', { ...cache, photos: photos.value.map(photo => {
+    // Web blob URLs expire on restart; IndexedDB holds the actual file.
+    // #ifdef WEB
+    if (photo.demo_media) return { ...photo, local: '' }
+    // #endif
+    return photo
+  }) })
+}
+
+function closeVideo() { playingId.value = ''; videoPath.value = '' }
+function releasePaths() {
+  revision++
+  closeVideo(); downloadingId.value = ''; imagePaths.value = {}; pendingPaths.clear()
+  // #ifdef WEB
+  for (const path of localPaths.values()) if (path.startsWith('blob:')) URL.revokeObjectURL(path)
+  // #endif
+  localPaths.clear()
+}
+
+async function resolvePath(photo: any): Promise<string> {
+  if (localPaths.has(photo.id)) return localPaths.get(photo.id)!
+  if (pendingPaths.has(photo.id)) return pendingPaths.get(photo.id)!
+  const currentRevision = revision
+  const task = (async () => {
+    const path = demo.value ? await restoreDemoMedia(photo) : photo.local || await downloadMedia(photo.storage_path)
+    if (disposed || currentRevision !== revision || !photos.value.some(p => p.id === photo.id)) {
+      // #ifdef WEB
+      if (path.startsWith('blob:')) URL.revokeObjectURL(path)
+      // #endif
+      throw new Error('相册状态已变更')
+    }
+    localPaths.set(photo.id, path)
+    if (!isVideo(photo)) imagePaths.value[photo.id] = path
+    photoFailed.value[photo.id] = false
+    return path
+  })().finally(() => { if (pendingPaths.get(photo.id) === task) pendingPaths.delete(photo.id) })
+  pendingPaths.set(photo.id, task)
+  return task
+}
+
+async function addMedia(kind: 'image' | 'video') {
+  if (busy.value) return
+  busy.value = true
+  const currentRevision = revision
+  const isDemo = demo.value
+  const owner = userId.value
+  const failures: string[] = []
+  let saved = 0
+  let loading = false
+  try {
+    const files = kind === 'video' ? await chooseOneVideo() : await chooseImages()
+    if (!files.length || currentRevision !== revision) return
+    loading = true
+    uni.showLoading({ title: '准备收藏…', mask: true })
+    for (let i = 0; i < files.length; i++) {
+      if (currentRevision !== revision || disposed) break
+      uni.showLoading({ title: '收藏 ' + (i + 1) + '/' + files.length, mask: true })
+      try {
+        const file = files[i]
+        const metadata = await inspectMedia(file.path, kind, file.name)
+        if (currentRevision !== revision || disposed) break
+        let rows: any[]
+        if (isDemo) {
+          const id = 'local-' + Date.now() + '-' + Math.random().toString(36).slice(2)
+          const local = await persistDemoMedia(file.path, id, metadata)
+          rows = [{ ...metadata, id, uploader_id: owner, local, demo_media: true, created_at: new Date().toISOString() }]
+          if (currentRevision !== revision || disposed) { await removeDemoMedia(rows[0]); break }
+        } else {
+          rows = await uploadMedia(file.path, metadata)
+        }
+        if (currentRevision !== revision || disposed) break
+        for (const row of rows) if (!photos.value.some(p => p.id === row.id)) photos.value.unshift(row)
+        if (isDemo) persistDemoPhotos()
+        saved++
+      } catch (e: any) { failures.push('第 ' + (i + 1) + ' 项：' + (e?.message || '收藏失败')) }
+    }
+    if (currentRevision !== revision || disposed) return
+    if (loading) { uni.hideLoading(); loading = false }
+    if (failures.length) uni.showModal({ title: '已收藏 ' + saved + ' 项，失败 ' + failures.length + ' 项', content: failures.join('\n'), showCancel: false })
+    else toast('已收藏 ' + saved + ' 项' + (isDemo ? '（本地演示）' : ''))
+  } catch (e: any) { if (currentRevision === revision && !disposed) toast(e?.message || '无法添加媒体') }
+  finally { if (loading) uni.hideLoading(); busy.value = false }
+}
+
+async function previewMedia(photo: any) {
+  if (isVideo(photo) && downloadingId.value) return
+  const currentRevision = revision
+  if (isVideo(photo)) { closeVideo(); downloadingId.value = photo.id }
+  try {
+    const path = await resolvePath(photo)
+    if (currentRevision !== revision || disposed) return
+    if (isVideo(photo)) { videoPath.value = path; playingId.value = photo.id }
+    else uni.previewImage({ urls: [path] })
+  } catch (e: any) { if (currentRevision === revision && !disposed) { photoFailed.value[photo.id] = true; toast(e?.message || '媒体加载失败') } }
+  finally { if (downloadingId.value === photo.id) downloadingId.value = '' }
+}
+
+function videoError(photo: any) {
+  closeVideo(); localPaths.delete(photo.id)
+  if (!demo.value) photo.local = ''
+  toast('视频无法播放，请重试或保存后使用系统播放器打开')
+}
+
+async function saveMedia(photo: any) {
+  const currentRevision = revision
+  try {
+    const path = await resolvePath(photo)
+    if (currentRevision !== revision || disposed) return
+    await saveMediaToAlbum(path, isVideo(photo))
+    toast('保存成功')
+  } catch (e: any) { if (currentRevision === revision && !disposed) toast(e?.message || '保存失败') }
+}
+
+async function removeMedia(photo: any) {
+  const currentRevision = revision
+  if (demo.value) {
+    const confirmed = await new Promise<boolean>(resolve => uni.showModal({ title: '清理本地回忆', content: '确定删除此演示文件？请先保存到手机。', success: r => resolve(r.confirm), fail: () => resolve(false) }))
+    if (!confirmed || currentRevision !== revision) return
+    try {
+      await removeDemoMedia(photo)
+      if (currentRevision !== revision || disposed) return
+      photos.value = photos.value.filter(p => p.id !== photo.id)
+      persistDemoPhotos()
+      toast('本地回忆已清理')
+    } catch (e: any) { toast(e?.message || '清理失败'); return }
+  } else await deletePhoto(photo)
+  if (!photos.value.some(p => p.id === photo.id)) {
+    if (playingId.value === photo.id) closeVideo()
+    const path = localPaths.get(photo.id) || ''
+    // #ifdef WEB
+    if (path.startsWith('blob:')) URL.revokeObjectURL(path)
+    // #endif
+    localPaths.delete(photo.id); delete imagePaths.value[photo.id]
+  }
+}
+
+watch(() => [demo.value, userId.value, cloud.url, cloud.session?.user?.id || '', entered.value], releasePaths, { flush: 'sync' })
+watch(tab, () => { if (tab.value !== 'photos') { revision++; closeVideo(); downloadingId.value = '' } })
+watch(() => photos.value.map(p => p.id + ':' + p.local).join('|'), async () => {
+  if (!demo.value) return
+  const currentRevision = revision
+  for (const photo of photos.value) {
+    if (currentRevision !== revision || disposed) return
+    if (isVideo(photo) || !photo.demo_media || localPaths.has(photo.id)) continue
+    try { await resolvePath(photo) } catch (_) { if (currentRevision === revision && !disposed) photoFailed.value[photo.id] = true }
+  }
+}, { immediate: true })
+onUnmounted(() => { disposed = true; releasePaths() })
 </script>
 
 <style>
@@ -52,4 +223,6 @@ const { photos, addPhoto, previewPhoto, photoFailed, formatDate, savePhoto, user
 .photo-name { color: #72604e; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .photo-actions { display: flex; flex-direction: row; justify-content: space-between; margin-top: 10px; }
 .delete-link { color: #a7998a; font-size: 10px; }
+.media-hint { margin-bottom: 14px; }
+.video-label { color: #72604e; font-size: 16px; margin-bottom: 10px; }
 </style>

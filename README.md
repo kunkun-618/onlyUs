@@ -1,39 +1,30 @@
 # 我们俩
 
-基于当前 uni-app x Vapor 工程实现的双人私密 Android 应用。提供登录、想你、聊天、照片、笔记、设置。页面采用暖纸色与陶土色，适配手机及宽屏。
+基于 uni-app x Vapor 的双人私密 Android 应用，包含账号登录、聊天、想你、共同相册、笔记和设置。支持本地演示模式；演示数据只保存在本机，不会同步给另一个人，也不适合存放敏感数据。
 
-## 运行
+## 已实现
 
-在 HBuilderX 打开本目录，运行到 Android 设备。未配置 Supabase 时，可在登录页进入本地演示；演示数据只在本机，不会发送给另一个人。演示没有真实认证，不应用于存储敏感数据。Web 演示图片使用临时地址，刷新后可能失效。
+- 聊天输入内置 16 个 emoji 和 4 个专属贴纸，可发送文字与贴纸。
+- 云端聊天缓存最多保留 500 条，并按 Supabase 项目地址和当前账号隔离；同步使用增量补拉，较早消息可继续分页加载。退出时清理当前会话缓存。
+- 相册图片每批最多 9 张；视频每次 1 个，仅支持 MP4。单文件最大 50 MiB，云端 Storage bucket 同样限制文件大小和 MIME 类型。
+- 笔记可导出 Markdown。原生端使用 UTF-8 写入应用目录并等待写入完成；失败会明确提示，提供复制内容作为备份的选项。Web 端触发浏览器下载。
+- 设置中可修改登录密码；今日想你记录可统计，笔记可按全部、私密或共享筛选。
+- 私密笔记仅作者可读，共享笔记对两位成员可读；相册对象位于私有 bucket。
 
-## 连接云端
+## 运行与连接 Supabase
 
-1. 按 `supabase/README.md` 创建项目、关闭公开注册、执行 `supabase/setup.sql`、手工创建两个邮箱账号并维护两条成员白名单。
-2. 登录页点击“连接 Supabase 项目”，填写 HTTPS 项目 URL 与 anon JWT 或 publishable key。不要提供 service_role 或 secret key。
-3. 使用预置账号登录。应用通过 uni.request、uni.uploadFile 和 WebSocket 接入 Supabase；没有依赖浏览器 fetch 的 SDK。
-4. 使用两部手机验证消息、想你、私密/共享笔记、上传下载和权限。实时连接状态只表示订阅状态，不代表对方在线。后台及离线无推送，恢复前台或每 30 秒补拉数据。
+在 HBuilderX 打开本目录并运行到 Android。配置云端前可从登录页进入本地演示。
 
-## 笔记与照片
+Supabase 初始化、账号白名单、权限和接口说明见 [supabase/README.md](supabase/README.md)。新项目使用 `supabase/setup.sql`；已初始化且已有用户及数据的项目，使用 `supabase/migrations/20261124_media.sql` 增量添加媒体字段和限制。该迁移不删库、不重建表、不删除已有用户或数据。前端连接只需项目 HTTPS URL 与 anon/publishable key，绝不要将 `service_role` 或 secret key 放入客户端。
 
-笔记默认 private，只有本人编辑删除，对方可查看 shared。Markdown 导出包含当前账号有权读取的所有分页笔记；Android 写入 `uni.env.USER_DATA_PATH` 应用目录，当前未提供系统“另存为”或文件分享入口，卸载应用会丢失沙盒文件。Web 触发浏览器下载。
+当前没有连接远端 Supabase，也没有执行远端 SQL 或验证线上 RLS；需要按部署文档在目标项目执行并实际验收。Realtime 仅在应用活跃、连接存续时用于同步，不等于 Android 后台推送。
 
-照片放在私有 photos bucket，通过用户令牌下载。保存操作写入手机相册，需授权。云端清理只允许上传者，清理前应先保存到手机。演示数据与正式云数据相互独立。
+## 后台通知
 
-## 页面结构
+当前未实现后台推送。面向国内 Android，建议优先评估 DCloud uni-push，并配置适用的厂商离线推送通道，不把依赖 Google 服务的 FCM 作为默认方案。建议链路为 Supabase Database Webhook 将业务事件通知受信任的服务端或 Edge Function，再由该服务端调用 uni-push 服务端接口；不需要因此强制把 Supabase 迁移到 uniCloud。
 
-`pages/index/index.uvue` 负责应用壳、主滚动区、导航和页面生命周期；`pages/index/components/` 按登录、首页、聊天、相册、笔记、设置及弹窗拆分视图；`pages/index/composables/usePairApp.ts` 集中管理页面状态、业务操作和同步清理，`composables/context.ts` 将同一页面实例注入子组件。多面板共用样式维护在 `pages/index/styles/shared.css`，面板独有样式留在组件内。新增页面面板时，在对应组件中通过 `usePairContext()` 取用所需状态和操作，并由页面壳添加原有 tab 条件分支。
+真正接入前还需开通 DCloud 推送服务，完成应用包名、签名和相关厂商通道/资质配置，并让客户端注册、上报 CID。服务端密钥只存放在服务端密钥管理环境，不得写入 App。具体边界、数据绑定和交付验收建议见 [docs/background-notifications.md](docs/background-notifications.md)。没有推送凭据与配置时，不发送通知，也不应宣称功能已完成。
 
-## APK 云打包
+## 编译与验收状态
 
-1. 登录 HBuilderX 的 DCloud 账号，确认 `manifest.json` 中的真实 AppID（当前已配置）。
-2. 在发行的 Android 云打包界面设置固定包名，例如 `com.yourname.justus`，确认后不要随意更改。
-3. 配置应用图标与签名。自用测试可使用公共测试证书，长期更新建议固定自有证书并妥善保管。
-4. 先运行到 Android 验证，随后通过“发行 → 原生 App 云打包 → Android”生成 APK，并用两部手机验收。
-
-## 当前验证状态
-
-2026-11-23 用户已完成 Supabase 初始化及 AppID 配置。随后使用 HBuilderX 5.34 对 Android Vapor 字节码目标进行了真实编译，修复 display:block、百分比 max-width/max-height 和 scroll-y 的兼容警告后再次编译成功，最终日志未再出现上述警告。
-
-同日完成页面模块拆分后，14:29:57 再次通过 Android Vapor 字节码编译，入口页及九个子组件均编译成功，日志未出现组件或样式警告。拆分后的登录布局、聊天滚动定位和弹窗交互仍需真机复测。
-
-验证命令：`cli.exe launch app-android --project <本项目路径> --compile true`。这是仅编译检查，编译结束停止运行属于正常行为。尚未在真实设备验证 Supabase 登录、RLS、上传下载及双设备 Realtime，也未生成发行 APK。请勿将编译成功或本地演示视为正式上线验收。
+项目曾通过 HBuilderX 5.34 Android Vapor 编译。近期样式 CSS 警告正在修复，最终编译验证尚未完成；也没有完成真机验收。Supabase 登录、RLS、媒体上传下载、双设备 Realtime、后台推送均未完成线上/真机验收。编译通过不代表这些功能已验收。

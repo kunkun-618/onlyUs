@@ -54,6 +54,9 @@ create table if not exists public.photos (
   uploader_id uuid not null default auth.uid() references auth.users(id),
   storage_path text not null unique,
   file_name text not null check (char_length(file_name) between 1 and 255),
+  media_type text not null default 'image' check (media_type in ('image', 'video')),
+  mime_type text,
+  size_bytes bigint check (size_bytes is null or size_bytes >= 0),
   created_at timestamptz not null default now(),
   constraint photos_owner_path check (
     split_part(storage_path, '/', 1) = uploader_id::text
@@ -61,6 +64,29 @@ create table if not exists public.photos (
     and storage_path !~ '(^|/)\.\.(/|$)'
   )
 );
+
+-- 兼容已存在的 photos 表；默认值会将既有行标记为 image，不重建或清空数据。
+alter table public.photos add column if not exists media_type text not null default 'image';
+alter table public.photos add column if not exists mime_type text;
+alter table public.photos add column if not exists size_bytes bigint;
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.photos'::regclass and conname = 'photos_media_type_check'
+  ) then
+    alter table public.photos add constraint photos_media_type_check
+      check (media_type in ('image', 'video'));
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.photos'::regclass and conname = 'photos_size_bytes_check'
+  ) then
+    alter table public.photos add constraint photos_size_bytes_check
+      check (size_bytes is null or size_bytes >= 0);
+  end if;
+end;
+$$;
 
 create index if not exists messages_created_at_id_idx on public.messages (created_at desc, id desc);
 create index if not exists miss_you_logs_created_at_id_idx on public.miss_you_logs (created_at desc, id desc);
@@ -125,7 +151,7 @@ grant insert (sender_id) on public.miss_you_logs to authenticated;
 grant insert (owner_id, title, content, visibility) on public.notes to authenticated;
 grant update (title, content, visibility) on public.notes to authenticated;
 grant delete on public.notes to authenticated;
-grant insert (uploader_id, storage_path, file_name) on public.photos to authenticated;
+grant insert (uploader_id, storage_path, file_name, media_type, mime_type, size_bytes) on public.photos to authenticated;
 grant delete on public.photos to authenticated;
 
 create policy app_members_read on public.app_members for select to authenticated
@@ -159,9 +185,15 @@ create policy photos_delete on public.photos for delete to authenticated
 using ((select app_private.is_app_member()) and uploader_id = (select auth.uid()));
 
 -- 只通过 Storage API 操作文件；不要直接 INSERT/DELETE storage.objects。
-insert into storage.buckets (id, name, public)
-values ('photos', 'photos', false)
-on conflict (id) do update set public = false;
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values (
+  'photos', 'photos', false, 52428800,
+  array['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'video/mp4']
+)
+on conflict (id) do update set
+  public = false,
+  file_size_limit = 52428800,
+  allowed_mime_types = array['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'video/mp4'];
 
 -- 不改动其他 bucket 的策略；已有项目必须审计其他 storage.objects 策略，见 README。
 drop policy if exists app_photos_read on storage.objects;
