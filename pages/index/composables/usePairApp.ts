@@ -130,7 +130,6 @@ export const usePairApp = () => {
 	
 	/** 恢复当前用户的聊天列表、分页状态与同步游标。 */
 	const restoreChat = () => {
-		// 当前服务地址和用户对应的聊天缓存。
 		const cache = readChatCache(cloud.url, userId.value)
 		messages.value = cache ? [...cache.messages].sort(compareMessages) : []
 		hasMore.value = cache?.hasMore || false
@@ -198,39 +197,41 @@ export const usePairApp = () => {
 		photosMore.value = false;
 		hasMore.value = false
 	}
-	
-	/** 校验登录表单，登录后恢复聊天并启动数据同步。 */
+
 	const signIn = async() => {
-		if (busy.value || signingOut) return
-		
-		saveConfig(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY)
-		
-		// 邮箱和密码空值校验
 		if (!email.value.trim() || !password.value) {
 			toast('请填写邮箱和密码')
 			return
 		}
+
+		saveConfig(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY)
 		resetData()
 		busy.value = true
-		// 登录开始时的数据代次，用于丢弃过期结果；异常 e 交由统一提示处理。
+
 		const revision = generation
 		try {
 			await login(email.value, password.value)
 			if (revision !== generation) return
-			password.value = ''; restoreChat(); await refreshAll()
+			password.value = ''
+			restoreChat()
+			await refreshAll()
 			if (revision !== generation) return
 			if (!cloud.session || !members.value.length) throw new Error('初始数据加载失败，请检查网络后重试')
 			entered.value = true; beginSync()
-		} catch (e) { if (revision === generation) {
-			removeCurrentChat()
-			clearSession()
-			resetData()
-			error(e)
-		} }
-		finally { if (revision === generation) busy.value = false }
+		} catch (e) {
+			if (revision === generation) {
+				removeCurrentChat()
+				clearSession()
+				resetData()
+				error(e)
+			}
+		} finally {
+			if (revision === generation) busy.value = false
 		}
-		/** 建立实时订阅，并通过前台轮询补齐数据变更。 */
-		const beginSync = () => {
+	}
+
+	/** 建立实时订阅，并通过前台轮询补齐数据变更。 */
+	const beginSync = () => {
 		stopRealtime?.()
 		// 订阅所属的数据代次，防止旧订阅更新新会话。
 		const revision = generation
@@ -300,195 +301,193 @@ export const usePairApp = () => {
 		messageText.value = ''
 		entered.value = false
 		tab.value = 'home'
-	}	
-	/** 保存连接配置并清理旧会话，提示重新登录。 */
-	const applyConfig = async () => {
-	if (signingOut) return
-	try {
-		removeCurrentChat();
-		resetData();
-		saveConfig(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
-		clearSession();
-		toast('连接已保存，请使用预置账号登录')
-	} catch (e) { error(e) }
-	}	
+	}
+
 	/** 合并并发刷新请求，同步成员、消息、今日想念、笔记和照片。 */
 	const refreshAll = async () => {
-	if (!cloud.session) return
-	if (refreshPromise) {
-		refreshAgain = true
-		return refreshPromise
-	}
-	// 本次刷新所属代次，防止重置后的状态被覆盖。
-	const revision = generation
-	// 供并发调用复用，并在结束时释放的刷新任务。
-	const task = (async () => {
-		try {
-		// 无新消息时可采用的本次同步起始时间。
-		const startedAt = new Date().toISOString()
-		// 是否需要先获取最近一页消息，而非执行增量同步。
-		const initial = !chatInitialized
-		/** 首次读取最近消息，后续按时间游标分页补齐增量。 */
-		const readMessages = async () => {
-			if (initial) return request('/rest/v1/messages?select=*&order=created_at.desc,id.desc&limit=50')
-			// 累积各页返回的增量消息。
-			const rows: any[] = []
-			// 向前重叠一秒的同步起点，配合去重避免遗漏边界消息。
-			const since = new Date(Date.parse(synced!) - 1000).toISOString()
-			// 上一页末条记录，用于稳定分页。
-			let cursor: any = null
-			while (revision === generation) {
-			// 当前页的增量消息。
-			const page = await request(
-				'/rest/v1/messages?select=*&order=created_at.asc,id.asc&limit=100&created_at=gte.' +
-				encodeURIComponent(since) +
-				(cursor ? '&' + afterCursor(cursor) : '')
-			)
-			if (revision !== generation) return []
-			rows.push(...page)
-			if (page.length < 100) break
-			cursor = page[page.length - 1]
+		if (!cloud.session) return
+		if (refreshPromise) {
+			refreshAgain = true
+			return refreshPromise
+		}
+		// 本次刷新所属代次，防止重置后的状态被覆盖。
+		const revision = generation
+		// 供并发调用复用，并在结束时释放的刷新任务。
+		const task = (async () => {
+			try {
+				// 无新消息时可采用的本次同步起始时间。
+				const startedAt = new Date().toISOString()
+				// 是否需要先获取最近一页消息，而非执行增量同步。
+				const initial = !chatInitialized
+				/** 首次读取最近消息，后续按时间游标分页补齐增量。 */
+				const readMessages = async () => {
+					if (initial) return request('/rest/v1/messages?select=*&order=created_at.desc,id.desc&limit=50')
+					// 累积各页返回的增量消息。
+					const rows: any[] = []
+					// 向前重叠一秒的同步起点，配合去重避免遗漏边界消息。
+					const since = new Date(Date.parse(synced!) - 1000).toISOString()
+					// 上一页末条记录，用于稳定分页。
+					let cursor: any = null
+					while (revision === generation) {
+						// 当前页的增量消息。
+						const page = await request(
+							'/rest/v1/messages?select=*&order=created_at.asc,id.asc&limit=100&created_at=gte.' +
+							encodeURIComponent(since) +
+							(cursor ? '&' + afterCursor(cursor) : '')
+						)
+						if (revision !== generation) return []
+						rows.push(...page)
+						if (page.length < 100) break
+						cursor = page[page.length - 1]
+					}
+					return rows
+				}	
+				/** 按本地今日的时间范围分页读取全部想念记录。 */
+				const readTodayMisses = async () => {
+					// 今日零点，作为查询的包含边界。
+					const start = new Date(now.value); start.setHours(0, 0, 0, 0)
+					// 明日零点，作为查询的排除边界。
+					const end = new Date(start); end.setDate(end.getDate() + 1)
+					// 累积今天所有分页的想念记录。
+					const rows: any[] = []
+					// 上一页末条想念记录。
+					let cursor: any = null
+					while (revision === generation) {
+						// 当前页的今日想念记录。
+						const page = await request('/rest/v1/miss_you_logs?select=*&order=created_at.asc,id.asc&limit=100&created_at=gte.' + encodeURIComponent(start.toISOString()) + '&created_at=lt.' + encodeURIComponent(end.toISOString()) + (cursor ? '&' + afterCursor(cursor) : ''))
+						if (revision !== generation) return []
+						rows.push(...page)
+						if (page.length < 100) break
+						cursor = page[page.length - 1]
+					}
+					return rows.reverse()
+				}
+				// 并发结果依次为成员、消息、想念、笔记与照片。
+				const result = await Promise.all([
+					request('/rest/v1/app_members?select=*'),
+					readMessages(),
+					readTodayMisses(),
+					request('/rest/v1/notes?select=*&order=updated_at.desc,id.desc&limit=' + Math.max(notes.value.length, 50)),
+					request('/rest/v1/photos?select=*&order=created_at.desc,id.desc&limit=' + Math.max(photos.value.length, 50))
+				])
+				if (revision !== generation) return
+				// 下方回调中 m 表示成员或消息记录，按用户标识校验权限并按记录标识去重。
+				if (!result[0].some((m: any) => m.user_id === userId.value)) {
+					removeCurrentChat()
+					resetData()
+					clearSession()
+					toast('当前账号没有成员权限');
+					return
+				}
+				lastRefresh = Date.now()
+				if (JSON.stringify(members.value) !== JSON.stringify(result[0])) members.value = result[0]
+				// 刷新前已有的消息标识集合。
+				const ids = new Set(messages.value.map(m => m.id))
+				// 本次真正新增的消息数，用于决定是否滚动到底部。
+				const newCount = result[1].filter((m: any) => !ids.has(m.id)).length
+				// 按消息标识合并本地记录与服务端记录。
+				const merged = new Map(messages.value.map(m => [m.id, m]))
+				result[1].forEach((m: any) => merged.set(m.id, m))
+				messages.value = Array.from(merged.values()).sort(compareMessages)
+				if (initial) hasMore.value = result[1].length === 50
+				// 排序后的本次消息结果，用于推进同步时间游标。
+				const fetched = [...result[1]].sort(compareMessages)
+				synced = fetched.length ? fetched[fetched.length - 1].created_at : synced || startedAt
+				chatInitialized = true
+				persistChat()
+				// 按标识合并今日查询与已有想念；m 为想念记录，a、b 为排序记录。
+				const missRows = new Map<string, any>(result[2].map((m: any) => [m.id, m]))
+				misses.value.forEach(m => { if (!missRows.has(m.id)) missRows.set(m.id, m) })
+				misses.value = Array.from(missRows.values()).sort((a: any, b: any) => -compareMessages(a, b))
+				// n、p 分别为已有笔记、照片，i 为对应索引；照片映射时复用本地路径。
+				notesMore.value = result[3].length >= Math.max(notes.value.length, 50)
+				if (notes.value.length !== result[3].length || notes.value.some((n, i) => n.id !== result[3][i].id || n.updated_at !== result[3][i].updated_at)) notes.value = result[3]
+				photosMore.value = result[4].length >= Math.max(photos.value.length, 50)
+				if (photos.value.length !== result[4].length || photos.value.some((p, i) => p.id !== result[4][i].id)) photos.value = result[4].map((p: any) => ({ ...p, local: photoPaths.get(p.id) || '' }))
+				if (tab.value === 'chat' && newCount) bottom()
+				if (tab.value === 'photos') hydratePhotos()
+			} catch (e) { if (revision === generation) error(e) }
+		})().finally(() => {
+			if (refreshPromise === task) {
+				refreshPromise = null
+				if (refreshAgain) {
+					refreshAgain = false
+					refreshAll()
+				}
 			}
-			return rows
-		}	
-		/** 按本地今日的时间范围分页读取全部想念记录。 */
-		const readTodayMisses = async () => {
-			// 今日零点，作为查询的包含边界。
-			const start = new Date(now.value); start.setHours(0, 0, 0, 0)
-			// 明日零点，作为查询的排除边界。
-			const end = new Date(start); end.setDate(end.getDate() + 1)
-			// 累积今天所有分页的想念记录。
-			const rows: any[] = []
-			// 上一页末条想念记录。
-			let cursor: any = null
-			while (revision === generation) {
-			// 当前页的今日想念记录。
-			const page = await request('/rest/v1/miss_you_logs?select=*&order=created_at.asc,id.asc&limit=100&created_at=gte.' + encodeURIComponent(start.toISOString()) + '&created_at=lt.' + encodeURIComponent(end.toISOString()) + (cursor ? '&' + afterCursor(cursor) : ''))
-			if (revision !== generation) return []
-			rows.push(...page)
-			if (page.length < 100) break
-			cursor = page[page.length - 1]
-			}
-			return rows.reverse()
-		}
-		// 并发结果依次为成员、消息、想念、笔记与照片。
-		const result = await Promise.all([
-			request('/rest/v1/app_members?select=*'),
-			readMessages(),
-			readTodayMisses(),
-			request('/rest/v1/notes?select=*&order=updated_at.desc,id.desc&limit=' + Math.max(notes.value.length, 50)),
-			request('/rest/v1/photos?select=*&order=created_at.desc,id.desc&limit=' + Math.max(photos.value.length, 50))
-		])
-		if (revision !== generation) return
-		// 下方回调中 m 表示成员或消息记录，按用户标识校验权限并按记录标识去重。
-		if (!result[0].some((m: any) => m.user_id === userId.value)) {
-			removeCurrentChat()
-			resetData()
-			clearSession()
-			toast('当前账号没有成员权限');
-			return
-		}
-		lastRefresh = Date.now()
-		if (JSON.stringify(members.value) !== JSON.stringify(result[0])) members.value = result[0]
-		// 刷新前已有的消息标识集合。
-		const ids = new Set(messages.value.map(m => m.id))
-		// 本次真正新增的消息数，用于决定是否滚动到底部。
-		const newCount = result[1].filter((m: any) => !ids.has(m.id)).length
-		// 按消息标识合并本地记录与服务端记录。
-		const merged = new Map(messages.value.map(m => [m.id, m]))
-		result[1].forEach((m: any) => merged.set(m.id, m))
-		messages.value = Array.from(merged.values()).sort(compareMessages)
-		if (initial) hasMore.value = result[1].length === 50
-		// 排序后的本次消息结果，用于推进同步时间游标。
-		const fetched = [...result[1]].sort(compareMessages)
-		synced = fetched.length ? fetched[fetched.length - 1].created_at : synced || startedAt
-		chatInitialized = true
-		persistChat()
-		// 按标识合并今日查询与已有想念；m 为想念记录，a、b 为排序记录。
-		const missRows = new Map<string, any>(result[2].map((m: any) => [m.id, m]))
-		misses.value.forEach(m => { if (!missRows.has(m.id)) missRows.set(m.id, m) })
-		misses.value = Array.from(missRows.values()).sort((a: any, b: any) => -compareMessages(a, b))
-		// n、p 分别为已有笔记、照片，i 为对应索引；照片映射时复用本地路径。
-		notesMore.value = result[3].length >= Math.max(notes.value.length, 50)
-		if (notes.value.length !== result[3].length || notes.value.some((n, i) => n.id !== result[3][i].id || n.updated_at !== result[3][i].updated_at)) notes.value = result[3]
-		photosMore.value = result[4].length >= Math.max(photos.value.length, 50)
-		if (photos.value.length !== result[4].length || photos.value.some((p, i) => p.id !== result[4][i].id)) photos.value = result[4].map((p: any) => ({ ...p, local: photoPaths.get(p.id) || '' }))
-		if (tab.value === 'chat' && newCount) bottom()
-		if (tab.value === 'photos') hydratePhotos()
-		} catch (e) { if (revision === generation) error(e) }
-	})().finally(() => {
-		if (refreshPromise === task) {
-		refreshPromise = null
-		if (refreshAgain) {
-			refreshAgain = false
-			refreshAll()
-		}
-		}
-	})
-	refreshPromise = task
-	return task
+		})
+		refreshPromise = task
+		return task
 	}
+
 	/** 为相册中尚无本地文件的图片补充下载路径。 */
 	const hydratePhotos = async () => {
-	// 本轮下载所属的数据代次。
-	const revision = generation
-	// photo 为当前待检查的照片，跳过视频、已下载及失败或下载中的项目。
-	for (const photo of photos.value) {
-		if (revision !== generation || tab.value !== 'photos' || !foreground) return
-		if (photo.media_type === 'video' || photo.local || photoFailed.value[photo.id] || photoLoading.has(photo.id)) continue
-		photoLoading.add(photo.id)
-		// path 为下载路径，current 为当前列表中匹配照片 p 的记录，避免写回旧对象。
-		try {
-		const path = await downloadPhoto(photo.storage_path)
-		if (revision !== generation) return
-		photoPaths.set(photo.id, path)
-		const current = photos.value.find(p => p.id === photo.id);
-		if (current) current.local = path
+		const revision = generation
+		// photo 为当前待检查的照片，跳过视频、已下载及失败或下载中的项目。
+		for (const photo of photos.value) {
+			if (revision !== generation || tab.value !== 'photos' || !foreground) return
+			if (photo.media_type === 'video' || photo.local || photoFailed.value[photo.id] || photoLoading.has(photo.id)) continue
+			photoLoading.add(photo.id)
+			// path 为下载路径，current 为当前列表中匹配照片 p 的记录，避免写回旧对象。
+			try {
+				const path = await downloadPhoto(photo.storage_path)
+				if (revision !== generation) return
+				photoPaths.set(photo.id, path)
+				const current = photos.value.find(p => p.id === photo.id)
+				if (current) current.local = path
+			}
+			catch (_) { if (revision === generation) photoFailed.value[photo.id] = true }
+			finally { if (revision === generation) photoLoading.delete(photo.id) }
 		}
-		catch (_) { if (revision === generation) photoFailed.value[photo.id] = true }
-		finally { if (revision === generation) photoLoading.delete(photo.id) }
 	}
-	}
+
 	/** 按最早消息的复合游标加载一页历史消息。 */
 	const loadOlder = async () => {
-	if (loadingHistory.value || !messages.value.length) return
-	loadingHistory.value = true
-	// 历史请求所属的数据代次。
-	const revision = generation
-	try {
-		// 当前列表最早的消息，作为向前翻页边界。
-		const first = messages.value[0]
-		// 查询早于边界时间与标识的复合筛选条件。
-		const cursor = 'or=' + encodeURIComponent('(created_at.lt.' + first.created_at + ',and(created_at.eq.' + first.created_at + ',id.lt.' + first.id + '))')
-		// 服务端按时间倒序返回的历史消息页。
-		const rows = await request('/rest/v1/messages?select=*&order=created_at.desc,id.desc&limit=50&' + cursor)
-		if (revision !== generation) return
-		// 已有消息 m 的标识集合，用于过滤分页重叠记录。
-		const seen = new Set(messages.value.map(m => m.id))
-		messages.value = [...rows.filter((m: any) => !seen.has(m.id)).reverse(), ...messages.value]
-		hasMore.value = rows.length === 50
-		messages.value.sort(compareMessages); persistChat()
+		if (loadingHistory.value || !messages.value.length) return
+		loadingHistory.value = true
+		// 历史请求所属的数据代次。
+		const revision = generation
+		try {
+			// 当前列表最早的消息，作为向前翻页边界。
+			const first = messages.value[0]
+			// 查询早于边界时间与标识的复合筛选条件。
+			const cursor = 'or=' + encodeURIComponent('(created_at.lt.' + first.created_at + ',and(created_at.eq.' + first.created_at + ',id.lt.' + first.id + '))')
+			// 服务端按时间倒序返回的历史消息页。
+			const rows = await request('/rest/v1/messages?select=*&order=created_at.desc,id.desc&limit=50&' + cursor)
+			if (revision !== generation) return
+			// 已有消息 m 的标识集合，用于过滤分页重叠记录。
+			const seen = new Set(messages.value.map(m => m.id))
+			messages.value = [...rows.filter((m: any) => !seen.has(m.id)).reverse(), ...messages.value]
+			hasMore.value = rows.length === 50
+			messages.value.sort(compareMessages); persistChat()
+		}
+		catch (e) { if (revision === generation) error(e) }
+		finally { if (revision === generation) loadingHistory.value = false }
 	}
-	catch (e) { if (revision === generation) error(e) }
-	finally { if (revision === generation) loadingHistory.value = false }
-	}
+
 	/** 发送输入框消息并更新列表、缓存与滚动位置。 */
-	const sendMessage = async () => {
-	// 去除首尾空白后的待发送正文。
-	const content = messageText.value.trim()
-	if (!content || sending.value) return
-	sending.value = true
-	// 发送操作所属的数据代次。
-	const revision = generation
-	try {
-		// 本地构造或云端返回的消息；后续以消息 m 的标识检查重复。
-		const row = (await request('/rest/v1/messages', 'POST', { content }))[0]
-		if (revision !== generation) return
-		if (!messages.value.some(m => m.id === row.id)) messages.value.push(row)
-		messages.value.sort(compareMessages); persistChat()
-		messageText.value = ''; bottom()
-	} catch (e) { if (revision === generation) error(e) } finally { if (revision === generation) sending.value = false }
+	const sendMessage = async (sticker?) => {
+		// 发送正文 / 表情包
+		const content = sticker ? sticker : messageText.value.trim()
+		if (!content || sending.value) return
+		sending.value = true
+		// 发送操作所属的数据代次。
+		const revision = generation
+		try {
+			// 本地构造或云端返回的消息；后续以消息 m 的标识检查重复。
+			const row = (await request('/rest/v1/messages', 'POST', { content }))[0]
+			if (revision !== generation) return
+			if (!messages.value.some(m => m.id === row.id)) messages.value.push(row)
+			messages.value.sort(compareMessages); persistChat()
+			if (!sticker) {
+				messageText.value = ''
+			}
+			bottom()
+		}
+		catch (e) { if (revision === generation) error(e) }
+		finally { if (revision === generation) sending.value = false }
 	}
+
 	/** 发送一条想念记录，并在短暂冷却后恢复爱心状态。 */
 	const sendMiss = async () => {
 	if (heartActive.value) return
@@ -778,7 +777,7 @@ export const usePairApp = () => {
 	members, unread, messageText, scrollTarget, heartActive, hasMore, loadingHistory, notesMore, photosMore,
 	photoFailed, noteOpen, noteTitle, noteContent, noteShared, editingId,
 	noteReadOnly, noteFilter, cloud, userId, myName, partnerName, today, todayMiss, todayMisses, latestMiss,
-	filteredNotes, toast, configured, formatDate, formatTime, switchTab, startDemo, signIn, applyConfig,
+	filteredNotes, toast, configured, formatDate, formatTime, switchTab, startDemo, signIn,
 	refreshAll, loadOlder, sendMessage, sendMiss, loadMoreNotes, loadMorePhotos, editNote, closeNote,
 	saveNote, deleteNote, addPhoto, previewPhoto, savePhoto, deletePhoto, exportNotes, clearCache, signOut,
 	finishSignOut, handleShow, handleHide

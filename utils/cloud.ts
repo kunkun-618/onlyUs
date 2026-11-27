@@ -15,38 +15,16 @@ export const configured = () => { return cloud.url.length > 0 && cloud.key.lengt
 // 会话变更版本号，用于拦截旧会话的异步结果。
 let authVersion = 0
 
-/** 校验并保存云配置，同时清除旧登录会话。 */
+/** 保存云配置 */
 export const saveConfig = (url: string, key: string) => {
-  // 去除空白及末尾斜杠的项目地址。
-  const clean = url.trim().replace(/\/+$/, '')
-  if (!/^https:\/\/[a-zA-Z0-9.-]+(?::\d+)?$/.test(clean)) throw new Error('请输入有效的 HTTPS 项目地址')
-  // 去除首尾空白后用于验证的公开密钥。
-  const cleanKey = key.trim()
-  if (!cleanKey.startsWith('sb_publishable_')) {
-    // JWT 中待解码的载荷片段。
-    const payload = cleanKey.split('.')[1] || ''
-    // 用于手动解码载荷的 Base64 字符表。
-    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-    // bits 为待消费位数，value 为位缓冲，decoded 为解码后的载荷文本。
-    let bits = 0, value = 0, decoded = ''
-    // char 为转换成标准 Base64 后逐个读取的载荷字符。
-    for (const char of payload.replace(/-/g, '+').replace(/_/g, '/')) {
-      // 当前字符对应的六位数值，无效字符会被跳过。
-      const digit = alphabet.indexOf(char)
-      if (digit < 0) continue
-      value = (value << 6) | digit; bits += 6
-      if (bits >= 8) { bits -= 8; decoded += String.fromCharCode((value >> bits) & 255) }
-    }
-    // 从载荷读取的角色，仅允许匿名公开角色。
-    let role = ''
-    try { role = JSON.parse(decoded).role } catch (_) {}
-    if (role !== 'anon') throw new Error('只允许 anon JWT 或 sb_publishable_ 公开密钥')
-  }
-  clearSession()
-  cloud.url = clean
-  cloud.key = key.trim()
-  uni.setStorageSync('pair_url', cloud.url)
-  uni.setStorageSync('pair_key', cloud.key)
+	cloud.url = clean
+	cloud.key = key
+	
+	// 存储失效或首次登录，触发本地存储
+	if (uni.getStorageSync('pair_url') == '' || uni.getStorageSync('pair_key') == '') {
+		uni.setStorageSync('pair_url', cloud.url)
+		uni.setStorageSync('pair_key', cloud.key)
+	}
 }
 
 /** 使用指定令牌发送云请求，未指定时使用公开密钥。 */
@@ -71,11 +49,13 @@ const raw = (path: string, method: string = 'GET', data: any = undefined, token:
 
 // 并发请求共用的会话刷新任务，避免重复刷新令牌。
 let refreshing: Promise<any> | null = null
+
 /** 更新响应式会话并将绝对过期时间写入本地存储。 */
 const persistSession = (session: any) => {
   cloud.session = { ...session, expires_at: Date.now() + session.expires_in * 1000 }
   uni.setStorageSync('pair_session', cloud.session)
 }
+
 /** 获取有效访问令牌，会话即将过期时合并刷新请求。 */
 export const token = async (): Promise<string> => {
   if (!cloud.session) throw new Error('请先登录')
@@ -107,20 +87,12 @@ export const request = async (path: string, method: string = 'GET', data: any = 
   return result
 }
 
-/** 使用邮箱密码登录，并确认账号属于双人成员名单。 */
 export const login = async (email: string, password: string) => {
-  clearSession()
-  // 清除旧会话后本次登录对应的版本。
-  const version = authVersion
-  // 密码认证取得的登录会话。
-  const session = await raw('/auth/v1/token?grant_type=password', 'POST', { email: email.trim(), password })
-  if (version !== authVersion) throw new Error('登录会话已变更')
-  persistSession(session)
-  try {
-    // 可访问的成员记录；m 为用于核对当前账号的单条成员记录。
-    const members = await request('/rest/v1/app_members?select=*')
-    if (!members.some((m: any) => m.user_id === session.user.id)) throw new Error('该账号不在双人成员名单内')
-  } catch (e) { clearSession(); throw e }
+	clearSession()
+	const version = authVersion
+	const session = await raw('/auth/v1/token?grant_type=password', 'POST', { email: email.trim(), password })
+	if (version !== authVersion) throw new Error('登录会话已变更')
+	persistSession(session)
 }
 
 /** 使旧异步任务失效，并清除内存与本地存储中的会话。 */

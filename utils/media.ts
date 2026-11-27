@@ -79,7 +79,8 @@ const cancelled = (error: any): boolean => { return error?.errCode === 1101001 |
 export const chooseImages = (): Promise<any[]> => {
   // resolve 返回所选文件列表，reject 传递错误；r 为选择结果，path、i 为路径及其索引，e 为失败详情。
   return new Promise((resolve, reject) => uni.chooseImage({
-    count: 9, sizeType: ['compressed'],
+    count: 9,
+	// sizeType: ['compressed'],
     success: (r: any) => resolve(r.tempFilePaths.slice(0, 9).map((path: string, i: number) => ({ path, name: r.tempFiles?.[i]?.name || '' }))),
     fail: (e: any) => cancelled(e) ? resolve([]) : reject(new Error('无法选择照片，请检查相册权限'))
   }))

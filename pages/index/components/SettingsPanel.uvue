@@ -12,10 +12,6 @@
       <text class="note-tag">私密成员</text>
     </view>
     <view class="settings-card">
-      <view class="setting-row" @click="configOpen = true">
-        <text class="setting-title">Supabase 项目连接</text>
-        <text class="setting-value">{{ cloud.status }} ›</text>
-      </view>
       <view class="setting-row" @click="refreshAll">
         <text class="setting-title">刷新同步数据</text>
         <text class="setting-value">↻</text>

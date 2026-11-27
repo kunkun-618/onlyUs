@@ -22,10 +22,8 @@ export interface ChatCache {
 
 /** 根据项目地址和账号生成隔离的缓存键。 */
 const cacheKey = (url: string, userId: string): string => {
-  // 去除空白和末尾斜杠后的标准化项目地址。
-  const project = url.trim().replace(/\/+$/, '').toLowerCase()
-  if (!/^https:\/\/[a-z0-9.-]+(?::\d+)?$/.test(project) || !userId.trim()) throw new Error('Invalid cache scope')
-  return 'pair_chat_v1:' + encodeURIComponent(project) + ':' + encodeURIComponent(userId)
+  if (!/^https:\/\/[a-z0-9.-]+(?::\d+)?$/.test(url) || !userId.trim()) throw new Error('Invalid cache scope')
+  return 'pair_chat_v1:' + encodeURIComponent(url) + ':' + encodeURIComponent(userId)
 }
 
 /** 校验、去重并截取缓存消息，非法数据返回空值。 */
@@ -54,15 +52,15 @@ const normalizeCache = (value: unknown): ChatCache | null => {
 
 /** 读取指定项目和账号的缓存，无效或读取失败时返回空值。 */
 export const readChatCache = (url: string, userId: string): ChatCache | null => {
-  try {
-    // 本地存储中的缓存原始字符串。
-    const stored = uni.getStorageSync(cacheKey(url, userId))
-    if (typeof stored !== 'string' || !stored) return null
-    // 解析后待检查版本与内容的缓存数据。
-    const data = JSON.parse(stored)
-    if (data?.version !== 1) return null
-    return normalizeCache(data)
-  } catch (_) { return null }
+	try {
+		// 本地存储中的缓存原始字符串。
+		const stored = uni.getStorageSync(cacheKey(url, userId))
+		if (typeof stored !== 'string' || !stored) return null
+		// 解析后待检查版本与内容的缓存数据。
+		const data = JSON.parse(stored)
+		if (data?.version !== 1) return null
+		return normalizeCache(data)
+	} catch (_) { return null }
 }
 
 /** 校验并写入聊天缓存，返回是否成功。 */

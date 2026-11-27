@@ -3,7 +3,7 @@
     <view class="composer-row">
       <button class="emoji-toggle" @click="panelOpen = !panelOpen">{{ panelOpen ? '收起' : '表情' }}</button>
       <input v-model="messageText" class="message-input" placeholder="说点什么，让我靠近你一点…" :maxlength="10000" :disabled="sending" confirm-type="send" @confirm="sendMessage" />
-      <button class="send-button" :disabled="sending || !messageText.trim()" @click="sendMessage">发送</button>
+      <button class="send-button" :disabled="sending || !messageText.trim()" @click="() => sendMessage()">发送</button>
     </view>
     <view v-if="panelOpen" class="emoji-panel">
       <text class="panel-label">小小心情 · 点击加入输入框</text>
@@ -26,7 +26,7 @@ import { ref } from 'vue'
 import { usePairContext } from '../composables/context'
 import { resolveSticker, stickers } from '../../../utils/stickers'
 // 取得消息草稿、发送方法与状态，以及用于识别当前会话的用户、连接。
-const { messageText, sendMessage, sending, userId, cloud } = usePairContext()
+const { messageText, sendMessage, sending, userId, cloud, toast } = usePairContext()
 // 表情与贴纸面板的展开状态。
 const panelOpen = ref(false)
 // 可插入消息输入框的快捷表情列表。
@@ -34,22 +34,19 @@ const emojis = ['😀', '🥰', '😘', '🥹', '😂', '😊', '😭', '🤗', 
 
 /** 在未发送且未超出长度限制时插入选中的表情。 */
 const insertEmoji = (emoji: string) => {
-  if (!sending.value && messageText.value.length + emoji.length <= 10000) messageText.value += emoji
+	if (!sending.value && messageText.value.length + emoji.length <= 10000) {
+		messageText.value += emoji
+	}
 }
 
-/** 临时替换草稿发送贴纸，并在同一会话中恢复原草稿。 */
+/** 发送贴纸 */
 const sendSticker = async (content: string) => {
-  if (sending.value || !resolveSticker(content)) return
-  // 发送前的文字草稿，供发送完成后恢复。
-  const draft = messageText.value
-  // 发送时的用户、项目地址，防止跨会话恢复草稿。
-  const scope = [userId.value, cloud.url]
-  messageText.value = content
-  try { await sendMessage() }
-  finally {
-    // 会话未变时恢复草稿，避免退出或切换账号后写回旧文字。
-    if (scope[0] === userId.value && scope[1] === cloud.url && (!messageText.value || messageText.value === content)) messageText.value = draft
-  }
+	if (sending.value || !resolveSticker(content)) return
+	try {
+		await sendMessage(content)
+	} catch (e) {
+		toast('发送贴纸失败')
+	}
 }
 </script>
 
@@ -57,93 +54,105 @@ const sendSticker = async (content: string) => {
 @import '../styles/shared.scss';
 
 .composer {
-  display: flex;
-  flex-direction: column;
-  padding: 12px 16px;
-  background-color: #f6f0e8;
-}
-.composer-row {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  width: 100%;
-}
-.message-input {
-  flex: 1;
-  min-width: 0;
-  border-radius: 10px;
-  background-color: $pair-color-surface;
-  padding: 10px 12px;
-  font-size: 12px;
-  height: 42px;
-  box-sizing: border-box;
-}
-.send-button {
-  margin-left: 9px;
-  background-color: $pair-color-primary;
-  color: #fffaf4;
-  font-size: 12px;
-  border-radius: 8px;
-  line-height: 40px;
-  padding: 0 16px;
-}
-.emoji-toggle {
-  margin-right: 8px;
-  padding: 0 8px;
-  line-height: 40px;
-  border-radius: 8px;
-  background-color: #ead8c8;
-  color: $pair-color-text;
-  font-size: 12px;
-}
-.emoji-panel {
-  display: flex;
-  flex-direction: column;
-  padding-top: 14px;
-  width: 100%;
-}
-.panel-label {
-  color: #927d6d;
-  font-size: 11px;
-  line-height: 24px;
-}
-.emoji-grid {
-  display: flex;
-  flex-direction: row;
-  flex-wrap: wrap;
-  padding: 4px 0 10px;
-}
-.emoji-item {
-  width: 12.5%;
-  margin: 0;
-  padding: 0;
-  line-height: 40px;
-  font-size: 24px;
-  background-color: #f6f0e8;
-  border: 0;
-}
-.sticker-grid {
-  display: flex;
-  flex-direction: row;
-  flex-wrap: wrap;
-}
-.sticker-item {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  width: 25%;
-  margin: 0;
-  padding: 6px 0;
-  background-color: #f6f0e8;
-  border: 0;
-}
-.sticker-preview {
-  width: 58px;
-  height: 58px;
-}
-.sticker-label {
-  color: #927d6d;
-  font-size: 11px;
-  line-height: 22px;
+	display: flex;
+	flex-direction: column;
+	padding: 12px 16px;
+	background-color: #f6f0e8;
+
+	.composer-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		width: 100%;
+
+		.message-input {
+			flex: 1;
+			min-width: 0;
+			border-radius: 10px;
+			background-color: $pair-color-surface;
+			padding: 10px 12px;
+			font-size: 12px;
+			height: 42px;
+			box-sizing: border-box;
+		}
+
+		.send-button {
+		margin-left: 9px;
+		background-color: $pair-color-primary;
+		color: #fffaf4;
+		font-size: 12px;
+		border-radius: 8px;
+		line-height: 40px;
+		padding: 0 16px;
+		}
+
+		.emoji-toggle {
+			margin-right: 8px;
+			padding: 0 8px;
+			line-height: 40px;
+			border-radius: 8px;
+			background-color: #ead8c8;
+			color: $pair-color-text;
+			font-size: 12px;
+		}
+	}
+
+	.emoji-panel {
+		display: flex;
+		flex-direction: column;
+		padding-top: 14px;
+		width: 100%;
+
+		.panel-label {
+			color: #927d6d;
+			font-size: 11px;
+			line-height: 24px;
+		}
+
+		.emoji-grid {
+			display: flex;
+			flex-direction: row;
+			flex-wrap: wrap;
+			padding: 4px 0 10px;
+			
+			.emoji-item {
+				width: 12.5%;
+				margin: 0;
+				padding: 0;
+				line-height: 40px;
+				font-size: 24px;
+				background-color: #f6f0e8;
+				border: 0;
+			}
+		}
+		
+		.sticker-grid {
+			display: flex;
+			flex-direction: row;
+			flex-wrap: wrap;
+			
+			.sticker-item {
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				width: 25%;
+				margin: 0;
+				padding: 6px 0;
+				background-color: #f6f0e8;
+				border: 0;
+				
+				.sticker-preview {
+					width: 58px;
+					height: 58px;
+				}
+
+				.sticker-label {
+					color: #927d6d;
+					font-size: 11px;
+					line-height: 22px;
+				}
+			}
+		}
+	}
 }
 </style>

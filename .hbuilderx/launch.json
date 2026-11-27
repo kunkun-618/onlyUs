@@ -2,7 +2,9 @@
     "version" : "1.0",
     "configurations" : [
         {
-            "playground" : "standard",
+            "customPlaygroundType" : "device",
+            "localRepoPath" : "D:/work/kun/app/onlyUs",
+            "playground" : "custom",
             "type" : "uni-app:app-android"
         }
     ]
