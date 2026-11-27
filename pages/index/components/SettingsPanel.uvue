@@ -60,7 +60,7 @@ import { changeAccountPassword } from '../../../utils/password'
 // 设置页共享上下文，提供账户与缓存操作。
 const context = usePairContext()
 // 取得用户、演示与连接信息、配置开关，以及刷新、清缓存和退出方法。
-const { myName, cloud, configOpen, refreshAll, clearCache, signOut, userId } = context
+const { myName, cloud, refreshAll, clearCache, signOut, userId } = context
 // 修改密码弹窗的显示状态。
 const passwordOpen = ref(false)
 // 密码请求是否进行中，防止重复提交。

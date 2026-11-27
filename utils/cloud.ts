@@ -1,5 +1,6 @@
 import { reactive } from 'vue'
 import { inspectMedia, validateMedia, mediaExtension, type MediaMetadata } from './media'
+import { cachedMedia } from './mediaCache'
 
 /** 云连接响应式状态：项目地址、公开密钥、登录会话和实时连接状态。 */
 export const cloud = reactive({
@@ -17,14 +18,12 @@ let authVersion = 0
 
 /** 保存云配置 */
 export const saveConfig = (url: string, key: string) => {
-	cloud.url = clean
-	cloud.key = key
+	cloud.url = url.trim().replace(/\/+$/, '')
+	cloud.key = key.trim()
 	
 	// 存储失效或首次登录，触发本地存储
-	if (uni.getStorageSync('pair_url') == '' || uni.getStorageSync('pair_key') == '') {
 		uni.setStorageSync('pair_url', cloud.url)
 		uni.setStorageSync('pair_key', cloud.key)
-	}
 }
 
 /** 使用指定令牌发送云请求，未指定时使用公开密钥。 */
@@ -230,20 +229,24 @@ export const downloadPhoto = async (path: string): Promise<string> => {
 }
 /** 携带访问令牌下载私有媒体，并拒绝会话变化后的下载结果。 */
 export const downloadMedia = async (path: string): Promise<string> => {
-  // 下载开始时的会话版本。
   const version = authVersion
-  // 访问私有媒体存储对象的有效令牌。
-  const access = await token()
-  if (version !== authVersion) throw new Error('登录会话已变更')
-  // resolve 返回临时文件路径，reject 传递下载错误；r 为下载接口响应。
-  return new Promise((resolve, reject) => uni.downloadFile({
-    url: cloud.url + '/storage/v1/object/authenticated/photos/' + path.split('/').map(encodeURIComponent).join('/'),
-    header: { apikey: cloud.key, Authorization: 'Bearer ' + access },
-    timeout: 120000,
-    success: (r: any) => {
-      if (version !== authVersion) { reject(new Error('登录会话已变更')); return }
-      r.statusCode === 200 ? resolve(r.tempFilePath) : reject(new Error('无法下载媒体文件'))
-    },
-    fail: () => reject(new Error('媒体下载失败'))
-  }))
+  const url = cloud.url
+  const userId = cloud.session?.user?.id || ''
+  const assertSession = () => {
+    if (!userId || version !== authVersion || cloud.url !== url || cloud.session?.user?.id !== userId) throw new Error('登录会话已变更')
+  }
+  return cachedMedia({ url, userId }, path, async () => {
+    const access = await token()
+    assertSession()
+    return new Promise<string>((resolve, reject) => uni.downloadFile({
+      url: url + '/storage/v1/object/authenticated/photos/' + path.split('/').map(encodeURIComponent).join('/'),
+      header: { apikey: cloud.key, Authorization: 'Bearer ' + access },
+      timeout: 120000,
+      success: (r: any) => {
+        try { assertSession() } catch (error) { reject(error); return }
+        r.statusCode === 200 ? resolve(r.tempFilePath) : reject(new Error('无法下载媒体文件'))
+      },
+      fail: () => reject(new Error('媒体下载失败'))
+    }))
+  }, assertSession, version)
 }

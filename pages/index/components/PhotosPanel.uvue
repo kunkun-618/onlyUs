@@ -98,20 +98,25 @@ const releasePaths = () => {
 
 /** 复用或解析指定媒体的本地路径，只缓存仍有效的结果。 */
 const resolvePath = async (photo: any): Promise<string> => {
-  if (localPaths.has(photo.id)) return localPaths.get(photo.id)!
+  // 云端路径交给持久缓存重新验证，避免一直信任已失效的文件。
+  if (!photo.storage_path && localPaths.has(photo.id)) return localPaths.get(photo.id)!
   if (pendingPaths.has(photo.id)) return pendingPaths.get(photo.id)!
   // 路径解析开始时的版本，用于检测资源状态变化。
   const currentRevision = revision
   /** 执行并共享本条媒体的路径解析任务。 */
   const task = (async () => {
     // 从演示存储、已有路径或云端下载取得的本地资源地址。
-    const path = photo.local || await downloadMedia(photo.storage_path)
+    const path = photo.storage_path ? await downloadMedia(photo.storage_path) : photo.local || await downloadMedia(photo.storage_path)
     if (disposed || currentRevision !== revision || !photos.value.some(/** 判断当前记录是否仍在相册中。 */ p => p.id === photo.id)) {
       // #ifdef WEB
       if (path.startsWith('blob:')) URL.revokeObjectURL(path)
       // #endif
       throw new Error('相册状态已变更')
     }
+    // #ifdef WEB
+    const previous = localPaths.get(photo.id)
+    if (previous && previous !== path && previous.startsWith('blob:')) URL.revokeObjectURL(previous)
+    // #endif
     localPaths.set(photo.id, path)
     if (!isVideo(photo)) imagePaths.value[photo.id] = path
     photoFailed.value[photo.id] = false

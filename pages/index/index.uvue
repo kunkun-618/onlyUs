@@ -10,6 +10,7 @@
         </view>
         <view class="avatar small" @click="tab = 'settings'"><text class="avatar-text">{{ myName.slice(0, 1) }}</text></view>
       </view>
+      <text v-if="syncError || syncing" class="sync-status">{{ syncError || '正在后台同步，本地内容可正常查看…' }}</text>
       <scroll-view class="body" direction="vertical" :scroll-into-view="scrollTarget" :scroll-with-animation="true">
         <HomePanel v-if="tab === 'home'" />
         <view v-else-if="tab === 'chat'" class="page">
@@ -29,7 +30,6 @@
         </view>
       </view>
     </view>
-    <ConnectionDialog v-if="configOpen" />
     <NoteEditor v-if="noteOpen" />
   </view>
 </template>
@@ -51,7 +51,7 @@ import NoteEditor from './components/NoteEditor.uvue'
 const app = usePairApp()
 providePairContext(app)
 // 取得登录、导航、用户名称、滚动、演示及弹窗状态，以及页签配置、未读数和切换方法。
-const { entered, tab, myName, scrollTarget, configOpen, noteOpen, tabs, unread, switchTab } = app
+const { entered, tab, myName, scrollTarget, syncing, syncError, noteOpen, tabs, unread, switchTab } = app
 onShow(app.handleShow)
 onHide(app.handleHide)
 </script>
@@ -104,6 +104,12 @@ onHide(app.handleHide)
 .body {
   flex: 1;
   height: 0;
+}
+.sync-status {
+  padding: 8px 24px;
+  font-size: 12px;
+  color: #926d59;
+  background-color: #eee5da;
 }
 .small {
   width: 32px;

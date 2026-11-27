@@ -1,6 +1,8 @@
-import { computed, onUnmounted, ref } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { cloud, configured, saveConfig, login, logout, clearSession, request, watchChanges, uploadPhoto, downloadPhoto } from '../../../utils/cloud'
-import { readChatCache, writeChatCache, removeChatCache } from '../../../utils/chatCache'
+import { readChatCache, removeChatCache } from '../../../utils/chatCache'
+import { readAppCache, writeAppCache, removeAppCache } from '../../../utils/appCache'
+import { clearMediaCacheScope } from '../../../utils/mediaCache'
 import { exportNoteFile } from '../../../utils/noteExport'
 import { SUPABASE_URL ,SUPABASE_PUBLISHABLE_KEY } from '../../../config/supabaseConfig'
 
@@ -19,6 +21,13 @@ export const usePairApp = () => {
 	const busy = ref(false) // 登录、笔记保存及照片添加等操作的忙碌状态。
 	const sending = ref(false)  // 消息发送锁，防止重复提交。
 	const exporting = ref(false)  // 笔记导出锁，防止重复导出。
+	const syncError = ref('')
+	const syncing = ref(false)
+	let initialized = new Set<string>()
+	let cursors: Record<string, string> = {}
+	let lastIdCheck = 0
+	let cacheTimer: any = null
+	let cacheWarning = false
 	const now = ref(Date.now()) // 驱动日期展示与跨日刷新的当前时间戳。
 	const email = ref('') // 登录表单中的邮箱。
 	const password = ref('')  // 登录表单中的密码。
@@ -48,10 +57,7 @@ export const usePairApp = () => {
 	let poll: any = null  // 定期刷新数据的轮询定时器。
 	let heartTimer: any = null  // 恢复爱心未激活状态的延时定时器。
 	let refreshPromise: Promise<void> | null = null // 正在执行的刷新任务，用于合并并发刷新。
-	let refreshAgain = false  // 当前刷新结束后是否还需补充刷新一次。
 	let generation = 0  // 数据代次，阻止重置前的异步结果写回当前状态。
-	let synced: string | null = null  // 聊天增量同步的时间游标。
-	let chatInitialized = false // 是否已完成聊天初始加载或恢复同步游标。
 	let signingOut = false  // 退出流程锁，避免退出期间再次登录或切换模式。
 	let lastRefresh = 0 // 上次成功刷新数据的时间戳。
 	let foreground = true // 页面是否处于前台，控制轮询与照片下载。	
@@ -114,27 +120,56 @@ export const usePairApp = () => {
 		return milliseconds || fraction(a.created_at).localeCompare(fraction(b.created_at)) || a.id.localeCompare(b.id)
 	}
 	
-	/** 缓存当前用户最近五百条消息及同步进度。 */
-	const persistChat = () => {
-		if (cloud.session) {
-			// 排序后的消息副本，避免缓存截取影响展示列表。
-			const ordered = [...messages.value].sort(compareMessages)
-			writeChatCache(cloud.url, userId.value, ordered.slice(-500), hasMore.value || ordered.length > 500, synced || undefined)
+	const persistData = () => {
+		clearTimeout(cacheTimer)
+		if (!cloud.session || !entered.value) return
+		try {
+			writeAppCache(cloud.url, userId.value, {
+				members: members.value, messages: messages.value, misses: misses.value,
+				notes: notes.value, photos: photos.value.map(p => ({ ...p, local: '' })),
+				initialized: [...initialized], cursors
+			})
+			cacheWarning = false
+		} catch (_) {
+			if (!cacheWarning) toast('本地存储空间不足，部分新数据尚未保存，请释放空间')
+			cacheWarning = true
 		}
+	}
+	watch([members, messages, misses, notes, photos], () => {
+		clearTimeout(cacheTimer)
+		cacheTimer = setTimeout(persistData, 150)
+	}, { deep: true })
+
+	/** 保存全部已下载的数据，不再截断聊天历史。 */
+	const persistChat = () => {
+		persistData()
 	}
 	
 	/** 删除当前真实账号的本地聊天缓存。 */
 	const removeCurrentChat = () => {
-		if (cloud.session) removeChatCache(cloud.url, userId.value)
+		if (cloud.session) {
+			removeChatCache(cloud.url, userId.value)
+			removeAppCache(cloud.url, userId.value)
+		}
 	}
 	
 	/** 恢复当前用户的聊天列表、分页状态与同步游标。 */
 	const restoreChat = () => {
+		const data = readAppCache(cloud.url, userId.value)
+		if (data) {
+			members.value = data.members
+			messages.value = data.messages.sort(compareMessages)
+			misses.value = data.misses.sort((a, b) => -compareMessages(a, b))
+			notes.value = data.notes
+			photos.value = data.photos
+			initialized = new Set(data.initialized)
+			cursors = data.cursors
+			hasMore.value = !initialized.has('messages')
+			return
+		}
 		const cache = readChatCache(cloud.url, userId.value)
 		messages.value = cache ? [...cache.messages].sort(compareMessages) : []
 		hasMore.value = cache?.hasMore || false
-		synced = cache?.syncedAt || (messages.value.length ? messages.value[0].created_at : null)
-		chatInitialized = !!synced
 	}
 	
 	/** 根据末条记录 row 构造按创建时间、标识向后翻页的筛选条件。 */
@@ -214,13 +249,11 @@ export const usePairApp = () => {
 			if (revision !== generation) return
 			password.value = ''
 			restoreChat()
-			await refreshAll()
-			if (revision !== generation) return
-			if (!cloud.session || !members.value.length) throw new Error('初始数据加载失败，请检查网络后重试')
-			entered.value = true; beginSync()
+			entered.value = true
+			refreshAll()
+			beginSync()
 		} catch (e) {
 			if (revision === generation) {
-				removeCurrentChat()
 				clearSession()
 				resetData()
 				error(e)
@@ -268,9 +301,13 @@ export const usePairApp = () => {
 	
 	/** 使旧异步任务失效，停止同步并清空页面业务状态。 */
 	const resetData = () => {
+		clearTimeout(cacheTimer)
+		initialized = new Set()
+		cursors = {}
+		lastIdCheck = 0
+		syncError.value = ''
+		syncing.value = false
 		generation++
-		synced = null
-		chatInitialized = false
 		busy.value = false
 		sending.value = false
 		exporting.value = false
@@ -283,7 +320,6 @@ export const usePairApp = () => {
 		lastRefresh = 0
 		photoLoading.clear()
 		refreshPromise = null
-		refreshAgain = false
 		stopRealtime?.()
 		stopRealtime = null
 		clearInterval(poll)
@@ -307,126 +343,120 @@ export const usePairApp = () => {
 	const refreshAll = async () => {
 		if (!cloud.session) return
 		if (refreshPromise) {
-			refreshAgain = true
 			return refreshPromise
 		}
 		// 本次刷新所属代次，防止重置后的状态被覆盖。
 		const revision = generation
 		// 供并发调用复用，并在结束时释放的刷新任务。
 		const task = (async () => {
+			syncing.value = true
+			syncError.value = ''
 			try {
-				// 无新消息时可采用的本次同步起始时间。
-				const startedAt = new Date().toISOString()
-				// 是否需要先获取最近一页消息，而非执行增量同步。
-				const initial = !chatInitialized
-				/** 首次读取最近消息，后续按时间游标分页补齐增量。 */
-				const readMessages = async () => {
-					if (initial) return request('/rest/v1/messages?select=*&order=created_at.desc,id.desc&limit=50')
-					// 累积各页返回的增量消息。
-					const rows: any[] = []
-					// 向前重叠一秒的同步起点，配合去重避免遗漏边界消息。
-					const since = new Date(Date.parse(synced!) - 1000).toISOString()
-					// 上一页末条记录，用于稳定分页。
+				// 各表独立提交，游标只由连续完成的分页推进，不使用实时消息的时间。
+				const readIncremental = async (table: string, target: typeof messages, field: string) => {
+					const since = cursors[table] ? new Date(Date.parse(cursors[table]) - 1000).toISOString() : ''
+					if (!since && !target.value.length) {
+						const recent = await request('/rest/v1/' + table + '?select=*&order=' + field + '.desc,id.desc&limit=50')
+						if (revision !== generation) return []
+						const merged = new Map(target.value.map(row => [row.id, row]))
+						recent.forEach((row: any) => merged.set(row.id, row))
+						target.value = [...merged.values()].sort((a, b) => table === 'messages' ? compareMessages(a, b) : Date.parse(b[field]) - Date.parse(a[field]))
+					}
 					let cursor: any = null
 					while (revision === generation) {
-						// 当前页的增量消息。
-						const page = await request(
-							'/rest/v1/messages?select=*&order=created_at.asc,id.asc&limit=100&created_at=gte.' +
-							encodeURIComponent(since) +
-							(cursor ? '&' + afterCursor(cursor) : '')
-						)
+						const boundary = cursor ? '&or=' + encodeURIComponent('(' + field + '.gt.' + cursor[field] + ',and(' + field + '.eq.' + cursor[field] + ',id.gt.' + cursor.id + '))') : ''
+						const page = await request('/rest/v1/' + table + '?select=*&order=' + field + '.asc,id.asc&limit=100' + (since ? '&' + field + '=gte.' + encodeURIComponent(since) : '') + boundary)
 						if (revision !== generation) return []
-						rows.push(...page)
+						const merged = new Map(target.value.map(row => [row.id, row]))
+						page.forEach((row: any) => merged.set(row.id, { ...merged.get(row.id), ...row }))
+						target.value = Array.from(merged.values()).sort((a, b) => table === 'messages' ? compareMessages(a, b) : Date.parse(b[field]) - Date.parse(a[field]) || b.id.localeCompare(a.id))
+						if (page.length) cursors[table] = page[page.length - 1][field]
+						clearTimeout(cacheTimer)
+						cacheTimer = setTimeout(persistData, 250)
+						if (table === 'messages' && tab.value === 'chat' && page.length) bottom()
 						if (page.length < 100) break
 						cursor = page[page.length - 1]
 					}
-					return rows
-				}	
-				/** 按本地今日的时间范围分页读取全部想念记录。 */
-				const readTodayMisses = async () => {
-					// 今日零点，作为查询的包含边界。
-					const start = new Date(now.value); start.setHours(0, 0, 0, 0)
-					// 明日零点，作为查询的排除边界。
-					const end = new Date(start); end.setDate(end.getDate() + 1)
-					// 累积今天所有分页的想念记录。
-					const rows: any[] = []
-					// 上一页末条想念记录。
-					let cursor: any = null
-					while (revision === generation) {
-						// 当前页的今日想念记录。
-						const page = await request('/rest/v1/miss_you_logs?select=*&order=created_at.asc,id.asc&limit=100&created_at=gte.' + encodeURIComponent(start.toISOString()) + '&created_at=lt.' + encodeURIComponent(end.toISOString()) + (cursor ? '&' + afterCursor(cursor) : ''))
-						if (revision !== generation) return []
-						rows.push(...page)
-						if (page.length < 100) break
-						cursor = page[page.length - 1]
-					}
-					return rows.reverse()
+					if (revision === generation) { initialized.add(table); persistData() }
+					return []
 				}
-				// 并发结果依次为成员、消息、想念、笔记与照片。
-				const result = await Promise.all([
-					request('/rest/v1/app_members?select=*'),
-					readMessages(),
-					readTodayMisses(),
-					request('/rest/v1/notes?select=*&order=updated_at.desc,id.desc&limit=' + Math.max(notes.value.length, 50)),
-					request('/rest/v1/photos?select=*&order=created_at.desc,id.desc&limit=' + Math.max(photos.value.length, 50))
+				// 仅校验可变数据的可见 ID，避免删除、取消共享后仍留下过期本地记录。
+				const reconcile = async (table: string, target: typeof notes) => {
+					const before = new Set(target.value.map(row => row.id))
+					const ids = new Set<string>()
+					let cursor = ''
+					while (revision === generation) {
+						const page = await request('/rest/v1/' + table + '?select=id&order=id.asc&limit=1000' + (cursor ? '&id=gt.' + encodeURIComponent(cursor) : ''))
+						if (revision !== generation) return
+						page.forEach((row: any) => ids.add(row.id))
+						if (page.length < 1000) break
+						cursor = page[page.length - 1].id
+					}
+					const known = new Set(target.value.map(row => row.id))
+					const missing = [...ids].filter(id => !known.has(id))
+					for (let i = 0; i < missing.length; i += 50) {
+						const rows = await request('/rest/v1/' + table + '?select=*&id=in.(' + missing.slice(i, i + 50).map(encodeURIComponent).join(',') + ')')
+						if (revision !== generation) return
+						const merged = new Map(target.value.map(row => [row.id, row]))
+						rows.forEach((row: any) => merged.set(row.id, row))
+						target.value = [...merged.values()]
+					}
+					const field = table === 'notes' ? 'updated_at' : 'created_at'
+					target.value = target.value.filter(row => ids.has(row.id) || !before.has(row.id)).sort((a, b) => table === 'messages' ? compareMessages(a, b) : Date.parse(b[field]) - Date.parse(a[field]) || b.id.localeCompare(a.id))
+					persistData()
+				}
+				const guard = async (work: () => Promise<any>) => {
+					try { await work() } catch (e: any) {
+						if (revision === generation) syncError.value = '同步未完成，正在显示本地数据：' + (e?.message || '请检查网络')
+					}
+				}
+				await Promise.all([
+					guard(async () => {
+						const rows = await request('/rest/v1/app_members?select=*')
+						if (revision !== generation) return
+						if (!rows.some((m: any) => m.user_id === userId.value)) {
+							removeCurrentChat(); resetData(); clearSession(); toast('当前账号没有成员权限'); return
+						}
+						members.value = rows; persistData()
+					}),
+					guard(async () => { await readIncremental('messages', messages, 'created_at'); if (revision === generation) hasMore.value = false }),
+					guard(() => readIncremental('miss_you_logs', misses, 'created_at')),
+					guard(async () => { await readIncremental('notes', notes, 'updated_at'); if (revision === generation) await reconcile('notes', notes) }),
+					guard(async () => { await readIncremental('photos', photos, 'created_at'); if (revision === generation) await reconcile('photos', photos) })
 				])
 				if (revision !== generation) return
-				// 下方回调中 m 表示成员或消息记录，按用户标识校验权限并按记录标识去重。
-				if (!result[0].some((m: any) => m.user_id === userId.value)) {
-					removeCurrentChat()
-					resetData()
-					clearSession()
-					toast('当前账号没有成员权限');
-					return
+				// 启动及每十分钟只核对 ID，补回迟提交且落在时间游标之前的记录。
+				if (Date.now() - lastIdCheck > 600000) {
+					await Promise.all([
+						guard(() => reconcile('messages', messages)),
+						guard(() => reconcile('miss_you_logs', misses))
+					])
+					if (revision !== generation) return
+					lastIdCheck = Date.now()
 				}
 				lastRefresh = Date.now()
-				if (JSON.stringify(members.value) !== JSON.stringify(result[0])) members.value = result[0]
-				// 刷新前已有的消息标识集合。
-				const ids = new Set(messages.value.map(m => m.id))
-				// 本次真正新增的消息数，用于决定是否滚动到底部。
-				const newCount = result[1].filter((m: any) => !ids.has(m.id)).length
-				// 按消息标识合并本地记录与服务端记录。
-				const merged = new Map(messages.value.map(m => [m.id, m]))
-				result[1].forEach((m: any) => merged.set(m.id, m))
-				messages.value = Array.from(merged.values()).sort(compareMessages)
-				if (initial) hasMore.value = result[1].length === 50
-				// 排序后的本次消息结果，用于推进同步时间游标。
-				const fetched = [...result[1]].sort(compareMessages)
-				synced = fetched.length ? fetched[fetched.length - 1].created_at : synced || startedAt
-				chatInitialized = true
-				persistChat()
-				// 按标识合并今日查询与已有想念；m 为想念记录，a、b 为排序记录。
-				const missRows = new Map<string, any>(result[2].map((m: any) => [m.id, m]))
-				misses.value.forEach(m => { if (!missRows.has(m.id)) missRows.set(m.id, m) })
-				misses.value = Array.from(missRows.values()).sort((a: any, b: any) => -compareMessages(a, b))
-				// n、p 分别为已有笔记、照片，i 为对应索引；照片映射时复用本地路径。
-				notesMore.value = result[3].length >= Math.max(notes.value.length, 50)
-				if (notes.value.length !== result[3].length || notes.value.some((n, i) => n.id !== result[3][i].id || n.updated_at !== result[3][i].updated_at)) notes.value = result[3]
-				photosMore.value = result[4].length >= Math.max(photos.value.length, 50)
-				if (photos.value.length !== result[4].length || photos.value.some((p, i) => p.id !== result[4][i].id)) photos.value = result[4].map((p: any) => ({ ...p, local: photoPaths.get(p.id) || '' }))
-				if (tab.value === 'chat' && newCount) bottom()
-				if (tab.value === 'photos') hydratePhotos()
+				notesMore.value = false
+				photosMore.value = false
+				photoFailed.value = {}
+				hydratePhotos()
 			} catch (e) { if (revision === generation) error(e) }
+			finally { if (revision === generation) syncing.value = false }
 		})().finally(() => {
 			if (refreshPromise === task) {
 				refreshPromise = null
-				if (refreshAgain) {
-					refreshAgain = false
-					refreshAll()
-				}
 			}
 		})
 		refreshPromise = task
 		return task
 	}
 
-	/** 为相册中尚无本地文件的图片补充下载路径。 */
+	/** 在后台逐项保存图片和视频，不阻塞页面和元数据同步。 */
 	const hydratePhotos = async () => {
 		const revision = generation
 		// photo 为当前待检查的照片，跳过视频、已下载及失败或下载中的项目。
 		for (const photo of photos.value) {
-			if (revision !== generation || tab.value !== 'photos' || !foreground) return
-			if (photo.media_type === 'video' || photo.local || photoFailed.value[photo.id] || photoLoading.has(photo.id)) continue
+			if (revision !== generation || !foreground) return
+			if (photo.local || photoFailed.value[photo.id] || photoLoading.has(photo.id)) continue
 			photoLoading.add(photo.id)
 			// path 为下载路径，current 为当前列表中匹配照片 p 的记录，避免写回旧对象。
 			try {
@@ -468,7 +498,7 @@ export const usePairApp = () => {
 	/** 发送输入框消息并更新列表、缓存与滚动位置。 */
 	const sendMessage = async (sticker?) => {
 		// 发送正文 / 表情包
-		const content = sticker ? sticker : messageText.value.trim()
+		const content = typeof sticker === 'string' ? sticker : messageText.value.trim()
 		if (!content || sending.value) return
 		sending.value = true
 		// 发送操作所属的数据代次。
@@ -479,7 +509,7 @@ export const usePairApp = () => {
 			if (revision !== generation) return
 			if (!messages.value.some(m => m.id === row.id)) messages.value.push(row)
 			messages.value.sort(compareMessages); persistChat()
-			if (!sticker) {
+		if (typeof sticker !== 'string') {
 				messageText.value = ''
 			}
 			bottom()
@@ -660,17 +690,6 @@ export const usePairApp = () => {
 		// 待导出的笔记集合，真实模式下改为分页获取全部记录。
 		let rows = [...notes.value]
 
-		// 清空已加载列表；cursor 保存上一页末条笔记以继续分页。
-		rows = []
-		let cursor: any = null
-		while (true) {
-			// 当前导出分页返回的笔记。
-			const page = await request('/rest/v1/notes?select=*&order=created_at.asc,id.asc&limit=100' + (cursor ? '&' + afterCursor(cursor) : ''))
-			if (revision !== generation) return
-			rows.push(...page)
-			if (page.length < 100) break
-			cursor = page[page.length - 1]
-		}
 
 		if (revision !== generation) return
 		if (!rows.length) {
@@ -682,7 +701,7 @@ export const usePairApp = () => {
 		// 导出工具返回的文件位置或保存结果说明。
 		const destination = await exportNoteFile(text)
 		if (revision !== generation) return
-		uni.showModal({ title: '笔记已导出', content: destination, showCancel: false })
+		uni.showModal({ title: '本地笔记已导出', content: (initialized.has('notes') ? '' : '首次同步尚未完成，本次仅包含已保存到本机的笔记。\n') + destination, showCancel: false })
 	} catch (e: any) {
 		if (revision !== generation) return
 		if (!text) { error(e); return }
@@ -696,7 +715,10 @@ export const usePairApp = () => {
 	const clearCache = async () => {
 	// 确认弹窗打开前的数据代次。
 	const revision = generation
-	if (!await confirm('将清理图片临时文件和内存列表；云端数据及登录状态保留。')) return
+	if (!await confirm('将删除本机保存的聊天、笔记、想念和媒体文件。离线时将无法查看，联网后会重新下载。确定清理？')) return
+	if (revision !== generation) return
+	try { await clearMediaCacheScope({ url: cloud.url, userId: userId.value }) }
+	catch (e) { error(e); return }
 	if (revision !== generation) return
 	removeCurrentChat()
 	// #ifndef WEB
@@ -717,14 +739,14 @@ export const usePairApp = () => {
 		await refreshAll()
 		if (reloadRevision !== generation) return
 		if (cloud.session && entered.value) beginSync()
-	toast('本地缓存已刷新')
+	toast(syncError.value ? '缓存已清理，联网后将重新同步' : '本地缓存已刷新')
 	}	
 	/** 执行退出并确保清理本地会话，即使云端退出失败也完成收尾。 */
 	const finishSignOut = async () => {
 	if (signingOut) return
 	signingOut = true
 	// 退出前的模式，决定是否需要调用云端退出。
-	removeCurrentChat()
+	persistData()
 	resetData()
 	// 清理后所属的数据代次，限制退出收尾操作的作用范围。
 	const revision = generation
@@ -755,13 +777,14 @@ export const usePairApp = () => {
 	updateNow()
 	if (entered.value) {
 		if (Date.now() - lastRefresh > 10000) refreshAll()
-		if (tab.value === 'photos') hydratePhotos()
+		hydratePhotos()
 	}
 	}
 	
 	/** 标记页面进入后台，暂停受前台状态约束的同步工作。 */
-	const handleHide = () => { foreground = false }	
+	const handleHide = () => { persistData(); foreground = false }
 	onUnmounted(() => {
+	persistData()
 	resetData()
 	clearInterval(clock)
 	})	
@@ -773,7 +796,7 @@ export const usePairApp = () => {
 	}
 	
 	return {
-	tabs, tab, entered, busy, sending, exporting, email, password, messages, misses, notes, photos,
+	tabs, tab, entered, busy, sending, exporting, syncing, syncError, email, password, messages, misses, notes, photos,
 	members, unread, messageText, scrollTarget, heartActive, hasMore, loadingHistory, notesMore, photosMore,
 	photoFailed, noteOpen, noteTitle, noteContent, noteShared, editingId,
 	noteReadOnly, noteFilter, cloud, userId, myName, partnerName, today, todayMiss, todayMisses, latestMiss,
